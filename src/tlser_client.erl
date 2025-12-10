@@ -33,104 +33,192 @@ init([]) ->
             {ciphers, tlser:cipher_suites(client)},
             {log_level, tlser:log_level()},
             {active, true},  % Use active=true to receive Post-Handshake NewSessionTicket messages
-            {session_tickets, auto}  % Enable automatic session ticket handling for TLS 1.3
-           ] ++ max_fragment_length(),
+            {session_tickets, manual}  % Manual session ticket handling
+           ],
 
-    % First connection - full handshake
-    io:format(user, "client> [1/2] Connecting to server ~s:~p (initial handshake)~n",
-              [server_host(), server_port()]),
-    {ok, Socket1} =
-        try
-            ssl:connect(server_host(), server_port(), BaseOpts, infinity)
-        catch
-            C:E:ST->
-                error({C, E, ST})
-        end,
-
-    % Get connection information from first connection
-    {ok, ConnInfo1} = ssl:connection_information(Socket1, [protocol]),
-    Protocol1 = proplists:get_value(protocol, ConnInfo1),
-    io:format(user, "client> [1/2] Connected. Protocol: ~p (full handshake)~n",
-              [Protocol1]),
-
-    % Send a message and receive response
-    ssl:send(Socket1, "ping"),
-
-    % Receive pong
-    % With {active, true}, messages come as {ssl, Socket, Data}
-    receive
-        {ssl, Socket1, "pong"} ->
-            io:format(user, "client> [1/2] Received pong~n", [])
-    after 2000 ->
-        io:format(user, "client> [1/2] Timeout waiting for pong~n", [])
-    end,
-
-    % In TLS 1.3, NewSessionTicket messages are sent as Post-Handshake messages
-    % after the handshake completes. According to the user guide, these are sent
-    % automatically by the server. With {session_tickets, auto}, the client
-    % automatically receives and stores these tickets.
-    % We need to keep the connection open to receive Post-Handshake messages.
-    % The NewSessionTicket is sent automatically, we just need to wait for it.
-    io:format(user, "client> [1/2] Waiting for NewSessionTicket (Post-Handshake message)...~n", []),
-    % Wait for Post-Handshake NewSessionTicket - it's handled automatically with {session_tickets, auto}
-    timer:sleep(3000),  % Give server time to send NewSessionTicket post-handshake message
-
-    % Close first connection (session ticket should have been received and stored)
-    ssl:close(Socket1),
-    io:format(user, "client> [1/2] Closed first connection~n", []),
-
-    % Brief pause to ensure ticket is fully processed
-    timer:sleep(500),
-
-    % Second connection - should resume session using PSK ticket
-    io:format(user, "client> [2/2] Connecting to server ~s:~p (should resume session)~n",
-              [server_host(), server_port()]),
-    {ok, Socket2} =
-        try
-            ssl:connect(server_host(), server_port(), BaseOpts, infinity)
-        catch
-            C2:E2:ST2->
-                error({C2, E2, ST2})
-        end,
-
-    % Get connection information from second connection
-    {ok, ConnInfo2} = ssl:connection_information(Socket2, [protocol, handshake]),
-    Protocol2 = proplists:get_value(protocol, ConnInfo2),
-    Handshake2 = proplists:get_value(handshake, ConnInfo2),
-    % Note: In TLS 1.3, Session IDs are not used for resumption (PSK tickets are used instead)
-    % Each connection gets a new Session ID even when resuming, so we don't print it
-    io:format(user, "client> [2/2] Connected. Protocol: ~p, Handshake: ~p (should be resumed via PSK)~n",
-              [Protocol2, Handshake2]),
-
-    % Send a message and receive response
-    ssl:send(Socket2, "ping"),
-
-    % Receive pong (with active=true, messages come as {ssl, Socket, Data})
-    receive
-        {ssl, Socket2, "pong"} ->
-            io:format(user, "client> [2/2] Received pong~n", [])
-    after 2000 ->
-        io:format(user, "client> [2/2] Timeout waiting for pong~n", [])
-    end,
-
-    % Note: For TLS 1.3, session resumption is handled automatically via PSK tickets
-    % The actual resumption detection is better done on the server side
-    % We'll report success if both connections completed successfully
-    io:format(user, "client> Both connections completed successfully~n", []),
-
-    {ok, _State = connected, _Data = #{socket => Socket2}}.
+    % Start in disconnected state - connection will be attempted via enter handler
+    {ok, disconnected, #{base_opts => BaseOpts, tickets => [], reconnected => false}}.
 
 callback_mode() ->
-    handle_event_function.
+    [state_enter, handle_event_function].
 
-handle_event(info, {ssl, Socket, Msg}, _State, #{socket := Socket}) ->
-    io:format(user, "client> received message: ~ts~n", [Msg]),
+% State: disconnected
+handle_event(enter, _OldState, disconnected, #{tickets := Tickets, reconnected := Reconnected} = Data) ->
+    % Check if we need tickets but don't have any
+    if Reconnected andalso Tickets =:= [] ->
+        io:format(user, "client> ERROR: No tickets available for reconnection~n", []),
+        {stop, no_tickets};
+    true ->
+        % Schedule connection attempt as state_timeout to avoid blocking
+        {keep_state, Data, [{state_timeout, 0, connect}]}
+    end;
+
+handle_event(state_timeout, connect, disconnected, #{base_opts := BaseOpts, tickets := Tickets, reconnected := Reconnected} = Data) ->
+    % Determine connection options based on state
+    Opts = if Reconnected ->
+        % Reconnection - use ticket
+        [Ticket | _] = Tickets,
+        io:format(user, "client> Reconnecting to server ~s:~p (using session ticket)~n",
+                  [server_host(), server_port()]),
+        BaseOpts ++ [{use_ticket, [Ticket]}];
+    true ->
+        % First connection - full handshake
+        io:format(user, "client> Connecting to server ~s:~p (initial handshake)~n",
+                  [server_host(), server_port()]),
+        BaseOpts
+    end,
+
+    % Attempt connection
+    try
+        case ssl:connect(server_host(), server_port(), Opts, infinity) of
+            {ok, Socket} ->
+                % Get connection information
+                {ok, ConnInfo} = ssl:connection_information(Socket, [protocol]),
+                Protocol = proplists:get_value(protocol, ConnInfo),
+                if Reconnected ->
+                    io:format(user, "client> Reconnected. Protocol: ~p (resumed via PSK)~n", [Protocol]);
+                true ->
+                    io:format(user, "client> Connected. Protocol: ~p (full handshake)~n", [Protocol])
+                end,
+
+                % Transition to connected state
+                {next_state, connected, Data#{socket => Socket, waiting_for_pong => false}};
+            {error, Reason} = Error ->
+                io:format(user, "client> Connection failed with error: ~p~n", [Reason]),
+                {stop, {connection_failed, Error}}
+        end
+    catch
+        C:E:ST ->
+            io:format(user, "client> Connection failed with exception: ~p:~p~n", [C, E]),
+            {stop, {connection_failed, C, E, ST}}
+    end;
+
+% State: connected
+handle_event(enter, _OldState, connected, #{socket := Socket} = Data) ->
+    % Send ping message
+    ssl:send(Socket, "ping"),
+    io:format(user, "client> Sent ping~n", []),
+    % Set timeout to check if we've received pong and tickets
+    % Wait a bit for tickets to arrive, then check if we can proceed
+    {keep_state, Data#{waiting_for_pong => true, pong_received => false},
+     [{state_timeout, 3000, check_complete}]};
+
+handle_event(info, {ssl, Socket, Msg}, connected, #{socket := Socket} = Data) ->
+    case Msg of
+        "pong" ->
+            io:format(user, "client> Received pong~n", []),
+            % Mark pong as received, check_complete timeout will handle next steps
+            {keep_state, Data#{waiting_for_pong => false, pong_received => true}};
+        Other ->
+            io:format(user, "client> Received unexpected message: ~ts~n", [Other]),
+            keep_state_and_data
+    end;
+
+handle_event(info, {ssl, session_ticket, TicketMap}, connected, #{tickets := Tickets} = Data) when is_map(TicketMap) ->
+    % Extract the ticket from the map
+    % The ticket is a tuple: {new_session_ticket, Lifetime, AgeAdd, Nonce, Ticket, Extensions}
+    TicketTuple = maps:get(ticket, TicketMap),
+    NewTickets = [TicketTuple | Tickets],
+    TicketCount = length(NewTickets),
+    io:format(user, "client> Received session ticket (~p total)~n", [TicketCount]),
+    {keep_state, Data#{tickets => NewTickets}};
+
+handle_event(info, {ssl, session_ticket, {_Socket, TicketData}}, connected, #{tickets := Tickets} = Data) ->
+    % Alternative format
+    NewTickets = [TicketData | Tickets],
+    TicketCount = length(NewTickets),
+    io:format(user, "client> Received session ticket (~p total)~n", [TicketCount]),
+    {keep_state, Data#{tickets => NewTickets}};
+
+handle_event(state_timeout, check_complete, connected, Data) ->
+    % Get values from Data map with defaults
+    Socket = maps:get(socket, Data, undefined),
+    Reconnected = maps:get(reconnected, Data, false),
+    Tickets = maps:get(tickets, Data, []),
+    PongReceived = maps:get(pong_received, Data, false),
+    
+    if Socket =:= undefined ->
+        io:format(user, "client> ERROR: Socket is undefined in check_complete~n", []),
+        {stop, no_socket};
+    not PongReceived ->
+        % Haven't received pong yet, wait a bit more
+        io:format(user, "client> Still waiting for pong, extending timeout~n", []),
+        {keep_state, Data, [{state_timeout, 2000, check_complete}]};
+    true ->
+        % We've received pong, check if we should disconnect
+        case Reconnected of
+            false ->
+                % First connection complete, disconnect and reconnect
+                io:format(user, "client> Disconnecting (first connection complete)~n", []),
+                ssl:close(Socket),
+                timer:sleep(1000),  % Wait 1 second
+                {next_state, disconnected, Data#{socket => undefined, reconnected => true}};
+            true ->
+                % Already reconnected once, now test with corrupted ticket
+                io:format(user, "client> Disconnecting (reconnection complete)~n", []),
+                ssl:close(Socket),
+
+                % Create a corrupted ticket using helper function
+                CorruptedTicket = corrupt_ticket(Tickets),
+
+                io:format(user, "client> Attempting reconnection with corrupted ticket (should fail)~n", []),
+                % Try to reconnect with corrupted ticket
+                BaseOpts = maps:get(base_opts, Data, []),
+                CorruptedOpts = BaseOpts ++ [{use_ticket, [CorruptedTicket]}],
+                % Use a timeout to avoid hanging if connection doesn't fail
+                case catch ssl:connect(server_host(), server_port(), CorruptedOpts, 5000) of
+                    {ok, BadSocket} ->
+                        % Check if PSK was actually used or if it fell back to full handshake
+                        {ok, ConnInfo} = ssl:connection_information(BadSocket, [protocol, handshake]),
+                        Handshake = proplists:get_value(handshake, ConnInfo),
+                        Protocol = proplists:get_value(protocol, ConnInfo),
+                        io:format(user, "client> Connection succeeded. Protocol: ~p, Handshake: ~p~n", [Protocol, Handshake]),
+                        if Handshake =:= resumed ->
+                            % PSK was used - this is unexpected for a corrupted ticket
+                            io:format(user, "client> ERROR: Connection with corrupted ticket used PSK resumption (unexpected)~n", []),
+                            ssl:close(BadSocket),
+                            {stop, unexpected_success};
+                        true ->
+                            % Full handshake - ticket was rejected and fell back (this is acceptable)
+                            io:format(user, "client> Corrupted ticket was rejected, fell back to full handshake (acceptable)~n", []),
+                            ssl:close(BadSocket),
+                            {stop, normal}
+                        end;
+                    {error, Reason} ->
+                        io:format(user, "client> Connection with corrupted ticket failed as expected: ~p~n", [Reason]),
+                        {stop, normal};
+                    {'EXIT', {timeout, _}} ->
+                        io:format(user, "client> Connection with corrupted ticket timed out (acceptable failure)~n", []),
+                        {stop, normal};
+                    {'EXIT', {C, E, _}} ->
+                        io:format(user, "client> Connection with corrupted ticket failed as expected: ~p:~p~n", [C, E]),
+                        {stop, normal};
+                    Other ->
+                        io:format(user, "client> Connection with corrupted ticket returned: ~p (treating as failure)~n", [Other]),
+                        {stop, normal}
+                end
+        end
+    end;
+
+handle_event(info, {ssl_closed, Socket}, connected, #{socket := Socket} = Data) ->
+    io:format(user, "client> Connection closed by server~n", []),
+    {keep_state, Data#{socket => undefined}};
+
+handle_event(info, {ssl_closed, _Socket}, connected, _Data) ->
+    % Socket closed but doesn't match our socket - ignore
     keep_state_and_data;
-handle_event(info, {ssl_closed, Socket}, _State, #{socket := Socket}) ->
-    io:format(user, "client> connection closed~n", []),
+
+handle_event(EventType, Event, connected, _Data) ->
+    io:format(user, "client> ignored event in connected state: ~p: ~p~n", [EventType, Event]),
     keep_state_and_data;
-handle_event(EventType, Event, _State, _Data) ->
-    io:format(user, "client> ignored event: ~p: ~p~n", [EventType, Event]),
+
+% State: disconnected - handle state_timeout events
+handle_event(state_timeout, _Event, disconnected, _Data) ->
+    % Should not happen - state_timeout should be handled above
+    keep_state_and_data;
+
+handle_event(EventType, Event, disconnected, _Data) ->
+    io:format(user, "client> ignored event in disconnected state: ~p: ~p~n", [EventType, Event]),
     keep_state_and_data.
 
 server_host() ->
@@ -141,11 +229,28 @@ server_host() ->
 
 server_port() -> tlser:server_port().
 
-max_fragment_length() ->
-    case os:getenv("TLSER_MAX_FRAGMENT_LENTH") of
-        false ->
-            [];
-        Int ->
-            Max = list_to_integer(Int),
-            [{max_fragment_length, Max}]
+% Generate a corrupted ticket that will cause connection failure
+% Takes a list of valid tickets and returns a corrupted version
+corrupt_ticket([FirstTicket | _Tickets]) ->
+    % Get a valid ticket and corrupt it severely
+    % Ticket format: {new_session_ticket, Lifetime, AgeAdd, Nonce, Ticket, Extensions}
+    case FirstTicket of
+        {new_session_ticket, _Lifetime, _AgeAdd, _Nonce, TicketBin, _Extensions} ->
+            % Replace the entire ticket with completely invalid data
+            % This should cause decryption/authentication to fail
+            InvalidTicketBin = case TicketBin of
+                <<_Head:100/binary, _Rest/binary>> ->
+                    % Ticket is long enough - corrupt first 100 bytes
+                    <<0:800>>;  % 100 bytes of zeros
+                _ ->
+                    % Short ticket - replace with invalid data
+                    <<"INVALID_CORRUPTED_TICKET_DATA_THAT_WILL_CAUSE_DECRYPTION_FAILURE">>
+            end,
+            % Use completely different nonce and invalid data
+            {new_session_ticket, 1, 999999, <<255,255,255,255,255,255,255,255>>, 
+                InvalidTicketBin, #{}};
+        _ ->
+            % Invalid ticket format - create completely invalid ticket
+            {new_session_ticket, 1, 0, <<255,255,255,255,255,255,255,255>>, 
+                <<"INVALID_TICKET_FORMAT">>, #{}}
     end.
