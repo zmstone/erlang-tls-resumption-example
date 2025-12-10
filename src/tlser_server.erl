@@ -30,8 +30,7 @@ init([]) ->
     {ok, ListenSock} =
     ssl:listen(tlser:server_port(),
                   tlser:files() ++
-                  [ {protocol, tlser:protocol()},
-                    {reuseaddr, true},
+                  [ {reuseaddr, true},
                     {verify, verify_peer},
                     {versions, tlser:versions()},
                     {ciphers, tlser:cipher_suites(server)},

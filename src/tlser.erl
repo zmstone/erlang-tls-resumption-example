@@ -2,7 +2,6 @@
 
 -export([ cipher_suites/1
         , versions/0
-        , protocol/0
         , server_port/0
         , tls_v13_ciphers/0
         , cert_dir/0
@@ -22,16 +21,7 @@ cipher_suites(client) ->
         Other -> string:tokens(Other, ",")
     end.
 
-protocol() ->
-    case os:getenv("TLSER_PROTOCOL") of
-        "dtls" -> dtls;
-        _ -> tls
-    end.
-
-versions() -> versions(protocol()).
-
-versions(dtls) -> ['dtlsv1.2'];
-versions(tls) ->
+versions() ->
     case os:getenv("TLSER_TLS_ERSIONS") of
         false ->
             ['tlsv1.3','tlsv1.2'];
