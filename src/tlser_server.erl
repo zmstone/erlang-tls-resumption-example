@@ -39,7 +39,7 @@ init([]) ->
                     {session_tickets, stateless}  % Enable stateless session tickets for TLS 1.3
                    ]),
     io:format(user, "server> listening on port ~p~n", [tlser:server_port()]),
-    {ok, _State = listening, _Data = #{listening => ListenSock, connection_count => 0}}.
+    {ok, _State = listening, _Data = #{listening => ListenSock}}.
 
 callback_mode() ->
     [state_enter, handle_event_function].
@@ -47,7 +47,7 @@ callback_mode() ->
 handle_event(enter, _OldState, listening, #{listening := _ListenSock} = D) ->
     % Schedule accepting a connection as a state_timeout
     {keep_state, D, [{state_timeout, 0, accept_connection}]};
-handle_event(state_timeout, accept_connection, listening, #{listening := ListenSock, connection_count := Count} = D) ->
+handle_event(state_timeout, accept_connection, listening, #{listening := ListenSock} = D) ->
     % Accept connection (this will block until a connection arrives)
     {ok, Socket0} = ssl:transport_accept(ListenSock),
     {ok, Socket} = ssl:handshake(Socket0),
@@ -56,59 +56,29 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
     % Check handshake type and PSK usage - PSK resumption in TLS 1.3
     {ok, ConnInfo} = ssl:connection_information(Socket, [protocol, handshake]),
     Protocol = proplists:get_value(protocol, ConnInfo),
-    Handshake = proplists:get_value(handshake, ConnInfo),
 
-    NewCount = Count + 1,
-
-    % For TLS 1.3, check if this is a resumed session
-    % In TLS 1.3, session resumption uses PSK (Pre-Shared Key) tickets
-    % Note: Even when PSK is used, handshake may show as 'full' in some Erlang versions
-    % So we check if it's the second+ connection with TLS 1.3, which indicates resumption
-    % when session_tickets are enabled
-    Resumed = case {NewCount, Protocol} of
-        {1, _} ->
-            false;  % First connection is never resumed
-        {_, 'tlsv1.3'} ->
-            % Second+ connection with TLS 1.3 and session_tickets enabled = PSK resumption
-            % (The actual PSK usage is verified by checking ServerHello in debug logs)
-            true;
-        _ ->
-            false
-    end,
-
-    case Resumed of
-        true ->
-            io:format(user, "server> [~p] *** SESSION RESUMED (PSK) *** Protocol: ~p, Handshake: ~p~n",
-                      [NewCount, Protocol, Handshake]);
-        false ->
-            io:format(user, "server> [~p] Full handshake. Protocol: ~p, Handshake: ~p~n",
-                      [NewCount, Protocol, Handshake])
-    end,
+    io:format(user, "server> Accepted client with protocol: ~p~n", [Protocol]),
 
     % Store resumption status globally for reporting
-    put({resumed, NewCount}, Resumed),
-    put(total_connections, NewCount),
 
-    {next_state, accepted, D#{accepted => Socket, conn_num => NewCount, connection_count => NewCount, listening => ListenSock}};
+    {next_state, accepted, D#{accepted => Socket, listening => ListenSock}};
 handle_event(EventType, Event, listening, _Data) ->
     io:format(user, "server> ignored event in listening state: ~p: ~0p~n", [EventType, Event]),
     keep_state_and_data;
-handle_event(enter, _OldState, accepted, #{conn_num := _ConnNum} = _Data) ->
+handle_event(enter, _OldState, accepted, _Data) ->
     keep_state_and_data;
-handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, conn_num := ConnNum, listening := _ListenSock, connection_count := _Count} = D) ->
-    io:format(user, "server> [~p] Connection closed~n", [ConnNum]),
+handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening := _ListenSock} = D) ->
+    io:format(user, "server> Connection closed~n", []),
     ssl:close(Sock),
-    % Remove accepted socket and conn_num when going back to listening
-    NewD = maps:remove(accepted, maps:remove(conn_num, D)),
-    {next_state, listening, NewD};
-handle_event(info, {ssl, Sock, Msg}, accepted, #{accepted := Sock, conn_num := ConnNum}) ->
-    io:format(user, "server> [~p] Received message: ~ts~n", [ConnNum, Msg]),
+    {next_state, listening, D};
+handle_event(info, {ssl, Sock, Msg}, accepted, #{accepted := Sock}) ->
+    io:format(user, "server> Received message: ~ts~n", [Msg]),
     case Msg of
         "ping" ->
             ssl:send(Sock, "pong"),
-            io:format(user, "server> [~p] Sent pong~n", [ConnNum]);
+            io:format(user, "server> Sent pong~n", []);
         _ ->
-            io:format(user, "server> [~p] Ignored message: ~ts~n", [ConnNum, Msg]),
+            io:format(user, "server> Ignored message: ~ts~n", [Msg]),
             ok
     end,
     keep_state_and_data;
