@@ -31,9 +31,9 @@ init([]) ->
     ssl:listen(tlser:server_port(),
                   tlser:files() ++
                   [ {reuseaddr, true},
-                    {verify, verify_none},
+                    {verify, verify_peer},  % Verify peer certificates when provided
+                    {fail_if_no_peer_cert, true},  % Require client certificates
                     {versions, ['tlsv1.3']},
-                    {ciphers, tlser:cipher_suites(server)},
                     {active, true},
                     {log_level, tlser:log_level()},
                     {session_tickets, stateless}  % Enable stateless session tickets for TLS 1.3
@@ -50,27 +50,51 @@ handle_event(enter, _OldState, listening, #{listening := _ListenSock} = D) ->
 handle_event(state_timeout, accept_connection, listening, #{listening := ListenSock} = D) ->
     % Accept connection (this will block until a connection arrives)
     {ok, Socket0} = ssl:transport_accept(ListenSock),
-    {ok, Socket} = ssl:handshake(Socket0),
 
-    % Get connection information to check if session was resumed
-    % Check handshake type and PSK usage - PSK resumption in TLS 1.3
-    {ok, ConnInfo} = ssl:connection_information(Socket, [protocol, handshake]),
-    Protocol = proplists:get_value(protocol, ConnInfo),
-
-    io:format(user, "server> Accepted client with protocol: ~p~n", [Protocol]),
-
-    % Store resumption status globally for reporting
-
-    {next_state, accepted, D#{accepted => Socket, listening => ListenSock}};
+    % Attempt handshake - it may fail if client doesn't provide certificates
+    case ssl:handshake(Socket0) of
+        {ok, Socket} ->
+            % Handshake succeeded - check session resumption using the OTP test pattern
+            case ssl:connection_information(Socket, [session_resumption]) of
+                {ok, [{session_resumption, SessionResumed}]} ->
+                    {ok, ConnInfo} = ssl:connection_information(Socket, [protocol]),
+                    Protocol = proplists:get_value(protocol, ConnInfo),
+                    case SessionResumed of
+                        true ->
+                            io:format(user, "server> Accepted client with protocol: ~p (session resumed)~n", [Protocol]);
+                        false ->
+                            io:format(user, "server> Accepted client with protocol: ~p (full handshake)~n", [Protocol])
+                    end;
+                {ok, ConnInfo} ->
+                    % Fallback if session_resumption is not in the expected format
+                    io:format(user, "server> WARNING: session_resumption not in expected format. ConnInfo: ~p~n", [ConnInfo]),
+                    Protocol = proplists:get_value(protocol, ConnInfo, unknown),
+                    io:format(user, "server> Accepted client with protocol: ~p (session_resumption check failed)~n", [Protocol]);
+                {error, Reason} ->
+                    io:format(user, "server> WARNING: Failed to get session_resumption info: ~p~n", [Reason])
+            end,
+            % Schedule accepting another connection to handle concurrent connections
+            {next_state, accepted, D#{accepted => Socket, listening => ListenSock}, [{state_timeout, 0, accept_connection}]};
+        {error, Reason} ->
+            % Handshake failed - log error, close socket, and continue accepting
+            io:format(user, "server> Handshake failed: ~p~n", [Reason]),
+            ssl:close(Socket0),
+            % Schedule another accept to continue listening
+            {next_state, listening, D, [{state_timeout, 0, accept_connection}]}
+    end;
 handle_event(EventType, Event, listening, _Data) ->
     io:format(user, "server> ignored event in listening state: ~p: ~0p~n", [EventType, Event]),
     keep_state_and_data;
+handle_event(enter, _OldState, accepted, #{listening := ListenSock} = D) ->
+    % Continue accepting new connections even when we have an active connection
+    {keep_state, D, [{state_timeout, 0, accept_connection}]};
 handle_event(enter, _OldState, accepted, _Data) ->
     keep_state_and_data;
-handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening := _ListenSock} = D) ->
+handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening := ListenSock} = D) ->
     io:format(user, "server> Connection closed~n", []),
     ssl:close(Sock),
-    {next_state, listening, D};
+    % Schedule accepting another connection
+    {next_state, listening, maps:remove(accepted, D), [{state_timeout, 0, accept_connection}]};
 handle_event(info, {ssl, Sock, Msg}, accepted, #{accepted := Sock}) ->
     io:format(user, "server> Received message: ~ts~n", [Msg]),
     case Msg of
