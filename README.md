@@ -29,5 +29,5 @@ A demo application to run TLS client & server with session resumption.
 - `TLSER_TLS_VERSION`: 1.2 or 1.3
 - `TLSER_CERT`: `path/to/certificates/dir`, in the dir, there must be:
   - CA: `ca.pem` for both client and server.
-  - Client: `client.key`, `client.pem`
-  - Server: `server.key`, `server.pem`
+  - Client: `client-key.pem`, `client-cert.pem`
+  - Server: `key.pem`, `cert.pem`
