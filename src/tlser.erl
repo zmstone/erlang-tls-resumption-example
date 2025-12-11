@@ -2,13 +2,21 @@
 
 -export([ cipher_suites/1
         , versions/0
+        , tls_version/0
         , server_port/0
         , tls_v13_ciphers/0
         , cert_dir/0
         , which_side/0
         , files/0
         , log_level/0
+        , start/0
         ]).
+
+start() ->
+    tlser_session_cache = tlser_session_cache:module_info(module),
+    {ok, [_|_]} = application:ensure_all_started(ssl),
+    {ok, [_|_]} = application:ensure_all_started(tlser),
+    ok.
 
 cipher_suites(server) ->
     case os:getenv("TLSER_CLIENT_CIPHERS") of
@@ -91,4 +99,21 @@ log_level() ->
             notice;
         "debug" ->
             debug
+    end.
+
+tls_version() ->
+    case os:getenv("TLSER_TLS_VERSION") of
+        false ->
+            undefined;  % Use both TLS 1.2 and 1.3
+        "1.2" ->
+            'tlsv1.2';
+        "1.3" ->
+            'tlsv1.3';
+        Other ->
+            % Try to parse as version atom
+            case Other of
+                "tlsv1.2" -> 'tlsv1.2';
+                "tlsv1.3" -> 'tlsv1.3';
+                _ -> undefined
+            end
     end.

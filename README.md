@@ -26,7 +26,7 @@ A demo application to run TLS client & server with session resumption.
 
 - `TLSER_LOG_LEVEL`: set "debug" to make ssl lib print debug log level.
 - `TLSER_SERVER_PORT`: default 9999, used to specify server port number
-- `TLSER_TLS_VERSIONS`: comma separated verstions. e.g. `1.1,1.2,1.3`
+- `TLSER_TLS_VERSION`: 1.2 or 1.3
 - `TLSER_CERT`: `path/to/certificates/dir`, in the dir, there must be:
   - CA: `ca.pem` for both client and server.
   - Client: `client.key`, `client.pem`
