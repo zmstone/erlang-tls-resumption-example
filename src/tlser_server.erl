@@ -77,7 +77,7 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
             {next_state, accepted, D#{accepted => Socket, listening => ListenSock}, [{state_timeout, 0, accept_connection}]};
         {error, Reason} ->
             % Handshake failed - log error, close socket, and continue accepting
-            io:format(user, "server> Handshake failed: ~p~n", [Reason]),
+            io:format(user, "server> Handshake failed: ~0p~n", [Reason]),
             ssl:close(Socket0),
             % Schedule another accept to continue listening
             {next_state, listening, D, [{state_timeout, 0, accept_connection}]}
