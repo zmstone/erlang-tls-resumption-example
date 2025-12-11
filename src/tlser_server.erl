@@ -36,7 +36,7 @@ init([]) ->
                     {versions, ['tlsv1.3']},
                     {active, true},
                     {log_level, tlser:log_level()},
-                    {session_tickets, stateless}  % Enable stateless session tickets for TLS 1.3
+                    {session_tickets, stateless_with_cert}  % Enable stateless session tickets with certificate info for TLS 1.3
                    ]),
     io:format(user, "server> listening on port ~p~n", [tlser:server_port()]),
     {ok, _State = listening, _Data = #{listening => ListenSock}}.
@@ -64,6 +64,21 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
                             io:format(user, "server> Accepted client with protocol: ~p (session resumed)~n", [Protocol]);
                         false ->
                             io:format(user, "server> Accepted client with protocol: ~p (full handshake)~n", [Protocol])
+                    end,
+                    % Inspect certificate information using ssl:peercert for resumed vs full handshake sessions
+                    case SessionResumed of
+                        true ->
+                            io:format(user, "server> Checking ssl:peercert for RESUMED session:~n", []);
+                        false ->
+                            io:format(user, "server> Checking ssl:peercert for FULL HANDSHAKE session:~n", [])
+                    end,
+                    case ssl:peercert(Socket) of
+                        {ok, Cert} ->
+                            io:format(user, "server> ssl:peercert returned certificate: ~0P~n", [Cert, 3]);
+                        {error, no_peercert} ->
+                            io:format(user, "server> ssl:peercert returned: {error, no_peercert}~n", []);
+                        {error, Reason} ->
+                            io:format(user, "server> ssl:peercert returned error: ~p~n", [Reason])
                     end;
                 {ok, ConnInfo} ->
                     % Fallback if session_resumption is not in the expected format
