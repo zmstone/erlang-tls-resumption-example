@@ -32,9 +32,6 @@ env TLSER_TLS_VERSION=1.2 ./run.sh client
 
 # Test TLS 1.3 session resumption
 env TLSER_TLS_VERSION=1.3 ./run.sh client
-
-# Test both TLS versions (default)
-./run.sh client
 ```
 
 ## How It Works
