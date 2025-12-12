@@ -135,6 +135,30 @@ env TLSER_LOG_LEVEL=debug ./run.sh server > server.log 2>&1
 env TLSER_TLS_VERSION=1.3 TLSER_LOG_LEVEL=debug ./run.sh client > client.log 2>&1
 ```
 
+### OpenSSL Client Interoperability Tests
+
+The project includes scripts to test session resumption using OpenSSL's `s_client` tool, which helps verify interoperability with standard TLS clients:
+
+```bash
+# Test TLS 1.2 session resumption with OpenSSL client
+./openssl-client-inter-op-tls1.2.sh
+
+# Test TLS 1.3 session resumption with OpenSSL client
+./openssl-client-inter-op-tls1.3.sh
+
+# With custom server host/port
+TLSER_SERVER_HOST=127.0.0.1 TLSER_SERVER_PORT=9999 ./openssl-client-inter-op-tls1.2.sh
+```
+
+These scripts:
+- Connect to the server using OpenSSL `s_client`
+- Send ping messages with client IDs (same format as Erlang client)
+- Save and reuse TLS sessions/tickets
+- Verify session resumption at the TLS level
+- Display minimal output (only Session IDs, resumption indicators, and pong responses)
+
+The server will verify session resumption based on the client ID and log the result, just like with the Erlang client.
+
 ## Session Resumption Verification
 
 The application uses ping message counts to determine expected resumption state:

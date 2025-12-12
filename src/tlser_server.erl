@@ -69,29 +69,34 @@ handle_event(enter, _OldState, listening, #{listening := _ListenSock} = D) ->
 handle_event(state_timeout, accept_connection, listening, #{listening := ListenSock} = D) ->
     % Accept connection (this will block until a connection arrives)
     {ok, Socket0} = ssl:transport_accept(ListenSock),
-
     % Attempt handshake - it may fail if client doesn't provide certificates
     case ssl:handshake(Socket0) of
         {ok, Socket} ->
             % Handshake succeeded - get session information
             % Session resumption will be determined when we receive the ping message with client ID
-            {ok, ConnInfo} = ssl:connection_information(Socket, [protocol, session_id]),
-            Protocol = proplists:get_value(protocol, ConnInfo),
-            SessionId = proplists:get_value(session_id, ConnInfo, <<>>),
+            case ssl:connection_information(Socket, [protocol, session_id]) of
+                {ok, ConnInfo} ->
+                    Protocol = proplists:get_value(protocol, ConnInfo),
+                    SessionId = proplists:get_value(session_id, ConnInfo, <<>>),
 
-            io:format(user, "server> Accepted client with protocol: ~p~n", [Protocol]),
-            io:format(user, "server> Session ID: ~P~n", [SessionId, 10]),
-            % Schedule accepting another connection to handle concurrent connections
-            ClientSessions = maps:get(client_sessions, D, #{}),
-            {next_state, accepted,
-                D#{
-                    accepted => Socket,
-                    listening => ListenSock,
-                    client_sessions => ClientSessions
-                },
-                [
-                    {state_timeout, 0, accept_connection}
-                ]};
+                    io:format(user, "server> Accepted client with protocol: ~p~n", [Protocol]),
+                    io:format(user, "server> Session ID: ~P~n", [SessionId, 10]),
+                    % Schedule accepting another connection to handle concurrent connections
+                    ClientSessions = maps:get(client_sessions, D, #{}),
+                    {next_state, accepted,
+                        D#{
+                            accepted => Socket,
+                            listening => ListenSock,
+                            client_sessions => ClientSessions
+                        },
+                        [
+                            {state_timeout, 0, accept_connection}
+                        ]};
+                {error, Reason} ->
+                    io:format(user, "server> Socket error right after handshake: ~0p~n", [Reason]),
+                    ssl:close(Socket0),
+                    {next_state, listening, D, [{state_timeout, 0, accept_connection}]}
+            end;
         {error, Reason} ->
             % Handshake failed - log error, close socket, and continue accepting
             io:format(user, "server> Handshake failed: ~0p~n", [Reason]),
