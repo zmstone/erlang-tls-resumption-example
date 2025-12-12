@@ -67,10 +67,25 @@ init([]) ->
             V -> [V]
         end,
 
+    % Build verify options based on hostname check setting
+    VerifyOpts =
+        case tlser:client_no_host_check() of
+            true ->
+                % Disable hostname verification but keep certificate verification
+                % Use customize_hostname_check with a match_fun that always returns true
+                [
+                    {verify, verify_peer},
+                    {customize_hostname_check, [
+                        {match_fun, fun(_CertDomain, _UserDomain) -> true end}
+                    ]}
+                ];
+            false ->
+                [{verify, verify_peer}]
+        end,
     BaseOpts0 =
         tlser:files() ++
+            VerifyOpts ++
             [
-                {verify, verify_peer},
                 {versions, Versions},
                 {log_level, tlser:log_level()},
                 {active, true}

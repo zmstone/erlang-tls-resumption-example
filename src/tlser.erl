@@ -10,7 +10,8 @@
     which_side/0,
     files/0,
     log_level/0,
-    start/0
+    start/0,
+    client_no_host_check/0
 ]).
 
 start() ->
@@ -119,4 +120,12 @@ tls_version() ->
                 "tlsv1.3" -> 'tlsv1.3';
                 _ -> undefined
             end
+    end.
+
+client_no_host_check() ->
+    case os:getenv("TLSER_CLIENT_NO_HOST_CHECK") of
+        "1" -> true;
+        "true" -> true;
+        "yes" -> true;
+        _ -> false
     end.

@@ -85,6 +85,11 @@ env TLSER_TLS_VERSION=1.3 ./run.sh client
 
 - `TLSER_SERVER_HOST`: Server hostname (default: `localhost`)
 
+- `TLSER_CLIENT_NO_HOST_CHECK`: Disable hostname verification
+  - Set to `"1"`, `"true"`, or `"yes"` to disable hostname checking
+  - Useful when connecting to IP addresses (e.g., `127.0.0.1`) instead of hostname
+  - Certificate verification is still performed, only hostname check is disabled
+
 - `TLSER_CLIENT_CIPHERS`: Comma-separated cipher suite names (optional)
 
 #### Server Configuration
@@ -115,6 +120,9 @@ env TLSER_LOG_LEVEL=debug ./run.sh server > server.log 2>&1
 
 # Terminal 2: Start client
 env TLSER_TLS_VERSION=1.2 TLSER_LOG_LEVEL=debug ./run.sh client > client.log 2>&1
+
+# Connect to IP address instead of hostname (disable hostname check)
+env TLSER_TLS_VERSION=1.2 TLSER_SERVER_HOST=127.0.0.1 TLSER_CLIENT_NO_HOST_CHECK=1 ./run.sh client
 ```
 
 ### Test TLS 1.3 Session Resumption
