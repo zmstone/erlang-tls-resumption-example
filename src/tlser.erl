@@ -11,7 +11,9 @@
     files/0,
     log_level/0,
     start/0,
-    client_no_host_check/0
+    client_no_host_check/0,
+    log/2,
+    log/3
 ]).
 
 start() ->
@@ -129,3 +131,41 @@ client_no_host_check() ->
         "yes" -> true;
         _ -> false
     end.
+
+% Logging with color support
+% Levels: error (red), success (green), info (no color)
+log(Level, Format) ->
+    log(Level, Format, []).
+
+log(error, Format, Args) ->
+    % Ensure reset code comes before newline to avoid extra blank lines
+    case lists:suffix("~n", Format) of
+        true ->
+            Base = lists:sublist(Format, length(Format) - 2),
+            io:put_chars(user, "\033[31m"),
+            io:format(user, Base, Args),
+            io:put_chars(user, "\033[0m"),
+            io:format(user, "~n", []);
+        false ->
+            io:put_chars(user, "\033[31m"),
+            io:format(user, Format, Args),
+            io:put_chars(user, "\033[0m")
+    end;
+log(success, Format, Args) ->
+    % Ensure reset code comes before newline to avoid extra blank lines
+    case lists:suffix("~n", Format) of
+        true ->
+            Base = lists:sublist(Format, length(Format) - 2),
+            io:put_chars(user, "\033[32m"),
+            io:format(user, Base, Args),
+            io:put_chars(user, "\033[0m"),
+            io:format(user, "~n", []);
+        false ->
+            io:put_chars(user, "\033[32m"),
+            io:format(user, Format, Args),
+            io:put_chars(user, "\033[0m")
+    end;
+log(info, Format, Args) ->
+    io:format(user, Format, Args);
+log(_Level, Format, Args) ->
+    io:format(user, Format, Args).

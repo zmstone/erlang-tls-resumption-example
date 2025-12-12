@@ -35,7 +35,7 @@ code_change(_Vsn, State, Data, _Extra) ->
     {ok, State, Data}.
 
 init([]) ->
-    io:format(user, "server> Starting TLS session resumption test server (TLS 1.2 and 1.3)~n", []),
+    tlser:log(info, "server> Starting TLS session resumption test server (TLS 1.2 and 1.3)~n", []),
     {ok, ListenSock} =
         ssl:listen(
             tlser:server_port(),
@@ -57,7 +57,7 @@ init([]) ->
                     % TLS 1.2 session resumption uses external storage configured via application env (session_cb)
                 ]
         ),
-    io:format(user, "server> listening on port ~p~n", [tlser:server_port()]),
+    tlser:log(info, "server> listening on port ~p~n", [tlser:server_port()]),
     {ok, _State = listening, _Data = #{listening => ListenSock, client_sessions => #{}}}.
 
 callback_mode() ->
@@ -79,8 +79,8 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
                     Protocol = proplists:get_value(protocol, ConnInfo),
                     SessionId = proplists:get_value(session_id, ConnInfo, <<>>),
 
-                    io:format(user, "server> Accepted client with protocol: ~p~n", [Protocol]),
-                    io:format(user, "server> Session ID: ~P~n", [SessionId, 10]),
+                    tlser:log(info, "server> Accepted client with protocol: ~p~n", [Protocol]),
+                    tlser:log(info, "server> Session ID: ~P~n", [SessionId, 10]),
                     % Schedule accepting another connection to handle concurrent connections
                     ClientSessions = maps:get(client_sessions, D, #{}),
                     {next_state, accepted,
@@ -93,13 +93,13 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
                             {state_timeout, 0, accept_connection}
                         ]};
                 {error, Reason} ->
-                    io:format(user, "server> Socket error right after handshake: ~0p~n", [Reason]),
+                    tlser:log(error, "server> Socket error right after handshake: ~0p~n", [Reason]),
                     ssl:close(Socket0),
                     {next_state, listening, D, [{state_timeout, 0, accept_connection}]}
             end;
         {error, Reason} ->
             % Handshake failed - log error, close socket, and continue accepting
-            io:format(user, "server> Handshake failed: ~0p~n", [Reason]),
+            tlser:log(error, "server> Handshake failed: ~0p~n", [Reason]),
             ssl:close(Socket0),
             % Schedule another accept to continue listening
             {next_state, listening, D, [{state_timeout, 0, accept_connection}]}
@@ -108,7 +108,7 @@ handle_event(state_timeout, accept_connection, listening, _Data) ->
     % Timeout may fire after state change - ignore silently
     keep_state_and_data;
 handle_event(EventType, Event, listening, _Data) ->
-    io:format(user, "server> ignored event in listening state: ~p: ~0p~n", [EventType, Event]),
+    tlser:log(info, "server> ignored event in listening state: ~p: ~0p~n", [EventType, Event]),
     keep_state_and_data;
 handle_event(enter, _OldState, accepted, #{listening := _ListenSock} = D) ->
     % Continue accepting new connections even when we have an active connection
@@ -116,7 +116,7 @@ handle_event(enter, _OldState, accepted, #{listening := _ListenSock} = D) ->
 handle_event(enter, _OldState, accepted, _Data) ->
     keep_state_and_data;
 handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening := ListenSock} = D) ->
-    io:format(user, "server> Connection closed~n", []),
+    tlser:log(info, "server> Connection closed~n", []),
     ssl:close(Sock),
     % Schedule accepting another connection
     {next_state, listening, D#{accepted => undefined, listening => ListenSock}, [
@@ -125,10 +125,10 @@ handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening :
 handle_event(
     info, {ssl, Sock, Msg}, accepted, #{accepted := Sock, client_sessions := ClientSessions} = Data
 ) ->
-    io:format(user, "server> Received message: ~0p~n", [Msg]),
+    tlser:log(info, "server> Received message: ~0p~n", [Msg]),
     handle_ping(Sock, Msg, ClientSessions, Data);
 handle_event(EventType, Event, accepted, _Data) ->
-    io:format(user, "server> ignored event: ~p: ~0p~n", [EventType, Event]),
+    tlser:log(info, "server> ignored event: ~p: ~0p~n", [EventType, Event]),
     keep_state_and_data.
 
 % Extract client ID from ping- prefixed messages
@@ -147,13 +147,13 @@ handle_ping(Sock, Msg, ClientSessions, Data) ->
         {ok, ClientId} ->
             process_ping_message(Sock, ClientId, ClientSessions, Data);
         {error, not_ping} ->
-            io:format(user, "server> Ignored message: ~ts~n", [Msg]),
+            tlser:log(info, "server> Ignored message: ~ts~n", [Msg]),
             keep_state_and_data
     end.
 
 % Process ping message with extracted client ID
 process_ping_message(Sock, ClientId, ClientSessions, Data) ->
-    io:format(user, "server> Received ping from client ID: ~s~n", [ClientId]),
+    tlser:log(info, "server> Received ping from client ID: ~s~n", [ClientId]),
     % Get client info (ping count and stored session ID)
     ClientInfo = maps:get(ClientId, ClientSessions, #{ping_count => 0, session_id => undefined}),
     PingCount = maps:get(ping_count, ClientInfo, 0),
@@ -174,7 +174,7 @@ process_ping_message(Sock, ClientId, ClientSessions, Data) ->
         ClientId, CurrentSessionId, NewPingCount, ClientSessions
     ),
     ssl:send(Sock, "pong"),
-    io:format(user, "server> Sent pong~n", []),
+    tlser:log(info, "server> Sent pong~n", []),
     {keep_state, Data#{client_sessions => NewClientSessions}}.
 
 % Check if session was resumed (works for both TLS 1.2 and 1.3)
@@ -207,7 +207,7 @@ check_session_resumption(Socket, StoredSessionId) ->
                     end
             end;
         {error, Reason} ->
-            io:format(user, "server> ERROR: Failed to get connection information: ~p~n", [Reason]),
+            tlser:log(error, "server> ERROR: Failed to get connection information: ~p~n", [Reason]),
             false
     end.
 
@@ -216,42 +216,31 @@ verify_resumption_status(ClientId, true, SessionResumed, StoredSessionId, Curren
     % Expected resumption - verify it happened
     case SessionResumed of
         true ->
-            io:format(
-                user,
-                "server> Session resumption verified - session RESUMED~n",
-                []
-            ),
-            io:format(
-                user,
-                "server> Session resumption verified for client ID: ~s~n",
+            tlser:log(
+                success,
+                "server> Session resumption verified - session RESUMED for client ID: ~s~n",
                 [ClientId]
             );
         false ->
-            io:format(
-                user,
-                "server> ERROR: Expected resumption but session was not resumed~n",
-                []
+            tlser:log(
+                error, "server> ERROR: Expected resumption but session was not resumed~n", []
             ),
             case StoredSessionId of
                 undefined ->
                     ok;
                 _ ->
-                    io:format(user, "server> Stored session ID: ~P~n", [StoredSessionId, 10]),
-                    io:format(user, "server> Current session ID: ~P~n", [CurrentSessionId, 10])
+                    tlser:log(info, "server> Stored session ID: ~P~n", [StoredSessionId, 10]),
+                    tlser:log(info, "server> Current session ID: ~P~n", [CurrentSessionId, 10])
             end,
-            io:format(
-                user,
-                "server> TEST FAILED: Session resumption did not work for client ID: ~s~n",
-                [ClientId]
+            tlser:log(
+                error, "server> TEST FAILED: Session resumption did not work for client ID: ~s~n", [
+                    ClientId
+                ]
             )
     end;
 verify_resumption_status(ClientId, false, _SessionResumed, _StoredSessionId, _CurrentSessionId) ->
     % First connection - full handshake expected
-    io:format(
-        user,
-        "server> First connection from client ID: ~s - storing session ID~n",
-        [ClientId]
-    ).
+    tlser:log(info, "server> First connection from client ID: ~s - storing session ID~n", [ClientId]).
 
 % Update client sessions map with new ping count and session ID
 update_client_sessions(ClientId, CurrentSessionId, NewPingCount, ClientSessions) ->
