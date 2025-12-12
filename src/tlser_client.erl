@@ -13,6 +13,26 @@
 
 name() -> ?MODULE.
 
+% Generate random, printable bytes as an ID.
+% The first byte is ensured to be a-z or A-Z.
+rand_id(Len) when Len > 0 ->
+    iolist_to_binary([rand_first_char(), rand_chars(Len - 1)]).
+
+rand_first_char() ->
+    base62(rand:uniform(52) - 1).
+
+rand_chars(0) ->
+    [];
+rand_chars(N) ->
+    [rand_char() | rand_chars(N - 1)].
+
+rand_char() ->
+    base62(rand:uniform(62) - 1).
+
+base62(I) when I < 26 -> $A + I;
+base62(I) when I < 52 -> $a + I - 26;
+base62(I) -> $0 + I - 52.
+
 start_link() ->
     gen_statem:start_link({local, name()}, ?MODULE, [], []).
 
@@ -67,8 +87,7 @@ init([]) ->
                 BaseOpts0 ++ [{session_tickets, manual}]
         end,
 
-    % Generate client ID using microsecond precision timestamp
-    ClientId = integer_to_binary(erlang:system_time(microsecond)),
+    ClientId = rand_id(16),
     % Start in disconnected state - connection will be attempted via enter handler
     {ok, disconnected, #{
         base_opts => BaseOpts,
