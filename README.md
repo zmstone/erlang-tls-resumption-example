@@ -97,7 +97,7 @@ env TLSER_TLS_VERSION=1.3 ./run.sh client
   - `"debug"` - Enable SSL debug logging
   - Not set - Standard logging (default)
 
-- `TLSER_CERTS`: Path to certificates directory (default: `ec`)
+- `TLSER_CERTS`: Path to certificates directory (default: `certs`)
   - Must contain:
     - `ca.pem` - CA certificate (used by both client and server)
     - `cert.pem` - Server certificate
