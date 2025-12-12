@@ -20,7 +20,6 @@ A demo application to run TLS client & server with session resumption.
 
 * `TLSER_SERVER_HOST`: default is `localhost`, used to specify server hostname.
 * `TLSER_CLIENT_CIPHERS`: comma separated cipher suite names. default "ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384"
-* `TLSER_MAX_FRAGMENT_LENTH`: 512 | 1024 | 2048 | 4096
 
 ### For both server and client
 

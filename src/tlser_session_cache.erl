@@ -2,104 +2,118 @@
 
 -behaviour(ssl_session_cache_api).
 
--export([init/1,
-         lookup/2,
-         update/3,
-         delete/2,
-         size/1,
-         terminate/1]).
+-export([
+    init/1,
+    lookup/2,
+    update/3,
+    delete/2,
+    size/1,
+    terminate/1,
+    select_session/2,
+    was_resumed/1
+]).
+
+-define(SERVER_CACHE, tlser_session_cache_server).
+-define(CLIENT_CACHE, tlser_session_cache_client).
+-define(RESUMPTION_TRACKER, tlser_resumption_tracker).
 
 init(InitArgs) ->
-    % SSL calls init/1 twice - once for client role, once for server role
-    % Since it's a named table, the CacheRef is the atom ?MODULE
-    case proplists:get_value(role, InitArgs) of
-        server ->
-            % Initialize named ETS table for session storage
-            % Returns the table name (atom ?MODULE) as CacheRef
-            io:format(user, "tlser_session_cache> init/1 called as server~n", []),
-            ets:new(?MODULE, [named_table, ordered_set, public]);
-        client ->
-            % Client role - return dummy (client doesn't use this cache)
-            % Client node doesn't have SSL app env configured, so this won't be called
-            io:format(user, "tlser_session_cache> init/1 called as client (ignored)~n", []),
-            dummy_client_cache;
+    Role = proplists:get_value(role, InitArgs, unknown),
+    io:format(user, "tlser_session_cache> init/1 called with role: ~p~n", [Role]),
+    Name =
+        case Role of
+            server ->
+                ?SERVER_CACHE;
+            client ->
+                ?CLIENT_CACHE
+        end,
+    _ = ets:new(Name, [named_table, ordered_set, public]),
+    io:format(user, "tlser_session_cache> Created new ETS table ~p~n", [Name]),
+    % Create resumption tracker table if it doesn't exist (shared across roles)
+    case ets:info(?RESUMPTION_TRACKER, name) of
+        undefined ->
+            _ = ets:new(?RESUMPTION_TRACKER, [named_table, set, public]),
+            io:format(user, "tlser_session_cache> Created resumption tracker table~n", []);
         _ ->
-            % Unknown role - return dummy cache ref
-            io:format(user, "tlser_session_cache> init/1 called with unknown role: ~0p~n", [InitArgs]),
-            dummy_cache
-    end.
+            ok
+    end,
+    Name.
 
-% API: lookup(CacheRef, Key) -> Session | undefined
-% CacheRef is ?MODULE (atom) for server-side calls
-% Key format: {PartialKey, SessionId} where PartialKey is {Host, Port} or Port
-lookup(?MODULE, Key) ->
+lookup(Name, Key) ->
     io:format(user, "tlser_session_cache> Session lookup called with key: ~0P~n", [Key, 10]),
-    case ets:lookup(?MODULE, Key) of
+    case ets:lookup(Name, Key) of
         [{Key, Session}] ->
-            io:format(user, "tlser_session_cache> Session lookup: FOUND session for key ~0P~n", [Key, 10]),
+            io:format(user, "tlser_session_cache> Session lookup: FOUND session for key ~0P~n", [
+                Key, 10
+            ]),
+            % Track that this session ID was found (indicating resumption for TLS 1.2)
+            % Extract session ID from key - for server, key is just session ID; for client, it's {HostPort, SessionId}
+            SessionId =
+                case Key of
+                    {_HostPort, Sid} when is_binary(Sid) ->
+                        Sid;
+                    Sid when is_binary(Sid) ->
+                        Sid;
+                    _ ->
+                        undefined
+                end,
+            case SessionId of
+                undefined ->
+                    ok;
+                _ ->
+                    % Mark this session ID as used for resumption
+                    ets:insert(?RESUMPTION_TRACKER, {SessionId, true})
+            end,
             Session;
         [] ->
-            io:format(user, "tlser_session_cache> Session lookup: NOT FOUND for key ~0P~n", [Key, 10]),
-            % Debug: show all keys in cache
-            AllKeys = ets:tab2list(?MODULE),
-            io:format(user, "tlser_session_cache> Cache currently contains ~p entries~n", [length(AllKeys)]),
-            case AllKeys of
-                [] ->
-                    io:format(user, "tlser_session_cache> Cache is empty~n", []);
-                _ ->
-                    io:format(user, "tlser_session_cache> Cache keys: ~0P~n", [AllKeys, 5])
-            end,
             undefined
-    end;
-lookup(CacheRef, Key) ->
-    % Non-server cache ref (shouldn't happen on server side)
-    io:format(user, "tlser_session_cache> Session lookup: non-server cache ref ~p, key ~0P~n", [CacheRef, Key, 5]),
-    undefined.
+    end.
 
-% API: update(CacheRef, Key, Session) -> DoNotCare
-% CacheRef is ?MODULE (atom) for server-side calls
-% Key format: {PartialKey, SessionId} where PartialKey is {Host, Port} or Port
-update(?MODULE, Key, Session) ->
+update(Name, Key, Session) ->
     io:format(user, "tlser_session_cache> Session update called with key: ~0P~n", [Key, 10]),
-    ets:insert(?MODULE, {Key, Session}),
+    ets:insert(Name, {Key, Session}),
     io:format(user, "tlser_session_cache> Session update: STORED session for key ~0P~n", [Key, 10]),
     % Debug: show session ID if available
     case Key of
         {_PartialKey, SessionId} ->
-            io:format(user, "tlser_session_cache> Session ID in key: ~0P (length: ~p)~n", [SessionId, 10, byte_size(SessionId)]);
+            io:format(user, "tlser_session_cache> Session ID in key: ~0P (length: ~p)~n", [
+                SessionId, 10, byte_size(SessionId)
+            ]);
         _ ->
             ok
     end,
-    ok;
-update(CacheRef, Key, _Session) ->
-    % Non-server cache ref (shouldn't happen on server side)
-    io:format(user, "tlser_session_cache> Session update: non-server cache ref ~p, key ~0P~n", [CacheRef, Key, 5]),
-    ok.
+    % Show current cache size
+    CacheSize = ets:info(Name, size),
+    io:format(user, "tlser_session_cache> Cache size after update: ~p~n", [CacheSize]),
+    true.
 
-% API: delete(CacheRef, Key) -> DoNotCare
-% CacheRef is ?MODULE (atom) for server-side calls
-delete(?MODULE, Key) ->
-    ets:delete(?MODULE, Key),
+delete(Name, Key) ->
+    ets:delete(Name, Key),
     io:format(user, "tlser_session_cache> Session delete: removed session for key ~0P~n", [Key, 2]),
-    ok;
-delete(_CacheRef, _Key) ->
-    % Non-server cache ref (shouldn't happen on server side)
-    ok.
+    true.
 
-% API: size(CacheRef) -> Size
-% CacheRef is ?MODULE (atom) for server-side calls
-size(?MODULE) ->
-    ets:info(?MODULE, size);
-size(_CacheRef) ->
-    % Non-server cache ref (shouldn't happen on server side)
-    0.
+size(Name) ->
+    ets:info(Name, size).
 
-% API: terminate(CacheRef) -> DoNotCare
-% CacheRef is ?MODULE (atom) for server-side calls
-terminate(?MODULE) ->
-    ets:delete(?MODULE),
-    io:format(user, "tlser_session_cache> Terminated external session cache~n", []),
-    ok;
-terminate(_CacheRef) ->
-    % Non-server cache ref (shouldn't happen on server side)
-    ok.
+terminate(Name) ->
+    io:format(
+        user,
+        "tlser_session_cache> Terminate called for cache (table kept alive for other role)~n",
+        []
+    ),
+    ets:delete(Name).
+
+select_session(_Cache, _Key) ->
+    io:format(user, "tlser_session_cache> select_session returns []~n", []),
+    [].
+
+% Check if a session ID was used for resumption (for TLS 1.2 detection)
+was_resumed(SessionId) when is_binary(SessionId) ->
+    case ets:lookup(?RESUMPTION_TRACKER, SessionId) of
+        [{SessionId, true}] ->
+            true;
+        [] ->
+            false
+    end;
+was_resumed(_) ->
+    false.

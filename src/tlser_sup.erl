@@ -26,19 +26,23 @@ start_link() ->
 %%                  type => worker(),       % optional
 %%                  modules => modules()}   % optional
 init([]) ->
-    SupFlags = #{strategy => one_for_all,
-                 intensity => 0,
-                 period => 1},
+    SupFlags = #{
+        strategy => one_for_all,
+        intensity => 0,
+        period => 1
+    },
     ChildSpec =
         case tlser:which_side() of
             server ->
-                #{id => tlser_server,
-                  start => {tlser_server, start_link, []}
-                 };
+                #{
+                    id => tlser_server,
+                    start => {tlser_server, start_link, []}
+                };
             client ->
-                #{id => tlser_client,
-                  start => {tlser_client, start_link, []}
-                 }
+                #{
+                    id => tlser_client,
+                    start => {tlser_client, start_link, []}
+                }
         end,
     {ok, {SupFlags, [ChildSpec]}}.
 
