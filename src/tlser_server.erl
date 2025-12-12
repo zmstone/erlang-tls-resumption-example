@@ -184,6 +184,12 @@ check_session_resumption(Socket, StoredSessionId) ->
             Protocol = proplists:get_value(protocol, ConnInfo),
             CurrentSessionId = proplists:get_value(session_id, ConnInfo, <<>>),
             SessionResumption = proplists:get_value(session_resumption, ConnInfo, undefined),
+            % Log what session_resumption returns for debugging
+            tlser:log(
+                info,
+                "server> DEBUG: Protocol=~p, SessionResumption=~p, SessionId length=~p~n",
+                [Protocol, SessionResumption, byte_size(CurrentSessionId)]
+            ),
             case Protocol of
                 'tlsv1.2' ->
                     % For TLS 1.2, compare session IDs
