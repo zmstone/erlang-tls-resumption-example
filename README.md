@@ -78,7 +78,7 @@ env TLSER_TLS_VERSION=1.3 ./run.sh client
 - `TLSER_TLS_VERSION`: TLS version to use
   - `"1.2"` - TLS 1.2 only
   - `"1.3"` - TLS 1.3 only
-  - Not set - Both TLS 1.2 and 1.3 (default)
+  - Not set - Both 1.3 (default)
 
 - `TLSER_SERVER_HOST`: Server hostname (default: `localhost`)
 
