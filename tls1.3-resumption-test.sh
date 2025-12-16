@@ -25,6 +25,29 @@ else
     TLS_PORT=8883
 fi
 
+# Certificate configuration
+CERT_DIR="${TLSER_CERTS:-certs}"
+CA_CERT="${CERT_DIR}/ca.pem"
+CLIENT_CERT="${CERT_DIR}/client-cert.pem"
+CLIENT_KEY="${CERT_DIR}/client-key.pem"
+
+# Check if certificates exist
+if [ ! -f "$CA_CERT" ]; then
+    echo "Warning: CA certificate not found at $CA_CERT (certificate verification may fail)"
+fi
+
+# Build certificate options if client cert/key exist
+CLIENT_OPTS=""
+if [ -f "$CLIENT_CERT" ] && [ -f "$CLIENT_KEY" ]; then
+    CLIENT_OPTS="-cert $CLIENT_CERT -key $CLIENT_KEY"
+    if [ -f "$CA_CERT" ]; then
+        CLIENT_OPTS="$CLIENT_OPTS -CAfile $CA_CERT"
+    fi
+elif [ -f "$CA_CERT" ]; then
+    # Only CA cert available (for servers that don't require client certs)
+    CLIENT_OPTS="-CAfile $CA_CERT"
+fi
+
 # Color codes
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -45,6 +68,7 @@ echo "--- First Connection (Establish TLS 1.3 Session) ---"
 (echo ""; sleep 1) | timeout 10 openssl s_client \
     -connect "${TLS_HOST}:${TLS_PORT}" \
     -tls1_3 \
+    $CLIENT_OPTS \
     -sess_out "$SESSION_FILE" \
     > /tmp/tls_first.log 2>&1 || true
 
@@ -194,6 +218,7 @@ echo "Using session file with ticket for TLS 1.3 resumption..."
 (echo ""; sleep 1) | timeout 10 openssl s_client \
     -connect "${TLS_HOST}:${TLS_PORT}" \
     -tls1_3 \
+    $CLIENT_OPTS \
     -sess_in "$SESSION_FILE" \
     > /tmp/tls_second.log 2>&1 || true
 
