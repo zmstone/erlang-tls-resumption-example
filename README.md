@@ -156,6 +156,62 @@ These scripts:
 
 The server will verify session resumption based on the client ID and log the result, just like with the Erlang client.
 
+### External Server Testing Scripts
+
+The project includes scripts to test TLS 1.3 session resumption against external servers (e.g., MQTT brokers):
+
+#### Pure TLS 1.3 Resumption Test
+
+```bash
+# Test TLS 1.3 session resumption (no application data)
+./tls1.3-resumption-test.sh [host:port]
+
+# Examples
+./tls1.3-resumption-test.sh localhost:8883
+./tls1.3-resumption-test.sh tls.example.com:443
+```
+
+**Features:**
+- Pure TLS handshake test (no application protocol)
+- Forces TLS 1.3 negotiation
+- Verifies TLS 1.3 session ticket was received
+- Disconnects and reconnects using the saved ticket
+- Verifies session resumption occurred
+- Useful for testing any TLS 1.3 server, not just MQTT
+
+**Requirements:**
+- Server must support TLS 1.3
+- Server must send session tickets for TLS 1.3 resumption
+
+**Exit Codes:**
+- `0` - Success (TLS 1.3 negotiated and resumption verified)
+- `1` - Failure (TLS 1.3 not supported, no ticket received, or resumption failed)
+
+Both scripts provide detailed error messages and debug information when tests fail, making it easy to diagnose TLS configuration issues.
+
+#### MQTT TLS 1.3 Resumption Test
+
+```bash
+# Test TLS 1.3 session resumption with MQTT server
+./mqtt-tls1.3-resumption-test.sh [host:port]
+
+# Examples
+./mqtt-tls1.3-resumption-test.sh localhost:8883
+./mqtt-tls1.3-resumption-test.sh mqtt.example.com:8883
+```
+
+**Features:**
+- Forces TLS 1.3 negotiation (exits with error if server doesn't support TLS 1.3)
+- Sends MQTT CONNECT packet over TLS
+- Verifies TLS 1.3 session ticket was received
+- Reconnects and verifies session resumption worked
+- Provides clear error messages if TLS 1.3 is not supported or tickets are not sent
+
+**Requirements:**
+- Server must support TLS 1.3
+- Server must send session tickets for TLS 1.3 resumption
+- Server must accept MQTT connections
+
 ## Session Resumption Verification
 
 The application uses ping message counts to determine expected resumption state:
