@@ -33,7 +33,7 @@ SESSION_FILE=$(mktemp)
 
 # Generate a simple MQTT CONNECT packet (MQTT 3.1.1)
 # Fixed header: 0x10 (CONNECT)
-# Remaining length: 0x16 (22 bytes)
+# Remaining length: 0x17 (23 bytes)
 # Variable header:
 #   Protocol name length: 00 04
 #   Protocol name: MQTT (4D 51 54 54)
@@ -41,14 +41,14 @@ SESSION_FILE=$(mktemp)
 #   Connect flags: 02 (clean session)
 #   Keep alive: 00 0A (10 seconds)
 # Payload:
-#   Client ID length: 00 0A (10)
+#   Client ID length: 00 0B (11)
 #   Client ID: "test-client" (74 65 73 74 2D 63 6C 69 65 6E 74)
 #
-# Full packet: 10 16 00 04 4D 51 54 54 04 02 00 0A 00 0A 74 65 73 74 2D 63 6C 69 65 6E 74
+# Full packet: 10 17 00 04 4D 51 54 54 04 02 00 0A 00 0B 74 65 73 74 2D 63 6C 69 65 6E 74
 #
 # Function to generate MQTT CONNECT packet (avoid null byte issues)
 generate_mqtt_connect() {
-    printf '\x10\x16\x00\x04MQTT\x04\x02\x00\x0A\x00\x0Atest-client'
+    printf '\x10\x17\x00\x04MQTT\x04\x02\x00\x0A\x00\x0Btest-client'
 }
 
 echo "=========================================="
