@@ -1,28 +1,40 @@
 #!/bin/bash
 
-# Test TLS 1.3 session resumption
+# Test TLS 1.3 session resumption across servers
 # This script:
-# 1. Connects to server using TLS 1.3
+# 1. Connects to first server using TLS 1.3
 # 2. Verifies TLS 1.3 session ticket was received
 # 3. Disconnects
-# 4. Reconnects using the session ticket
-# 5. Verifies session resumption worked
+# 4. Connects to second server using the session ticket from first server
+# 5. Verifies session resumption worked (tests stateless ticket sharing)
 # 6. Prints result in green (success) or red (failure)
 #
 # Requirements:
-# - Server must support TLS 1.3
-# - Server must send session tickets for TLS 1.3 resumption
+# - Both servers must support TLS 1.3
+# - Both servers must share the same ticket seed/key
+# - First server must send session tickets for TLS 1.3 resumption
 
 set -euo pipefail
 
-# Parse host:port argument, default to localhost:8883
-TLS_HOST_PORT="${1:-localhost:8883}"
-if [[ "$TLS_HOST_PORT" == *:* ]]; then
-    TLS_HOST="${TLS_HOST_PORT%%:*}"
-    TLS_PORT="${TLS_HOST_PORT##*:}"
+# Parse host:port arguments
+# First endpoint (to get ticket from)
+TLS_HOST_PORT_1="${1:-localhost:8883}"
+if [[ "$TLS_HOST_PORT_1" == *:* ]]; then
+    TLS_HOST_1="${TLS_HOST_PORT_1%%:*}"
+    TLS_PORT_1="${TLS_HOST_PORT_1##*:}"
 else
-    TLS_HOST="$TLS_HOST_PORT"
-    TLS_PORT=8883
+    TLS_HOST_1="$TLS_HOST_PORT_1"
+    TLS_PORT_1=8883
+fi
+
+# Second endpoint (to use ticket on) - defaults to first endpoint if not provided
+TLS_HOST_PORT_2="${2:-$TLS_HOST_PORT_1}"
+if [[ "$TLS_HOST_PORT_2" == *:* ]]; then
+    TLS_HOST_2="${TLS_HOST_PORT_2%%:*}"
+    TLS_PORT_2="${TLS_HOST_PORT_2##*:}"
+else
+    TLS_HOST_2="$TLS_HOST_PORT_2"
+    TLS_PORT_2=8883
 fi
 
 # Certificate configuration
@@ -56,17 +68,21 @@ NC='\033[0m' # No Color
 SESSION_FILE=$(mktemp)
 
 echo "=========================================="
-echo "TLS 1.3 Session Resumption Test"
+echo "TLS 1.3 Cross-Server Session Resumption Test"
 echo "=========================================="
-echo "Server: ${TLS_HOST}:${TLS_PORT}"
+echo "First Server (get ticket):  ${TLS_HOST_1}:${TLS_PORT_1}"
+echo "Second Server (use ticket): ${TLS_HOST_2}:${TLS_PORT_2}"
+echo ""
+echo "This test verifies that stateless TLS 1.3 tickets can be"
+echo "shared across servers that use the same ticket seed/key."
 echo ""
 
-# First connection - establish TLS 1.3 session
-echo "--- First Connection (Establish TLS 1.3 Session) ---"
+# First connection - establish TLS 1.3 session on first server
+echo "--- First Connection (Establish TLS 1.3 Session on ${TLS_HOST_1}:${TLS_PORT_1}) ---"
 # Force TLS 1.3 - exit with error if server doesn't support it
 # Keep connection open briefly to receive session ticket (TLS 1.3 tickets are sent after handshake)
 (echo ""; sleep 1) | timeout 10 openssl s_client \
-    -connect "${TLS_HOST}:${TLS_PORT}" \
+    -connect "${TLS_HOST_1}:${TLS_PORT_1}" \
     -tls1_3 \
     $CLIENT_OPTS \
     -sess_out "$SESSION_FILE" \
@@ -139,7 +155,7 @@ if ! echo "$TLS_VERSION" | grep -qE "TLSv1\.3|1\.3"; then
     echo "  3. Server explicitly disabled TLS 1.3"
     echo ""
     echo "Connection details:"
-    echo "  Server: ${TLS_HOST}:${TLS_PORT}"
+    echo "  Server: ${TLS_HOST_1}:${TLS_PORT_1}"
     if [ -n "$TLS_VERSION_LINE" ]; then
         echo "  Negotiated: $TLS_VERSION_LINE"
     else
@@ -207,16 +223,15 @@ else
 fi
 echo ""
 
-# Wait a moment before reconnecting
+# Wait a moment before connecting to second server
 sleep 1
 
-# Second connection - resume TLS 1.3 session
-echo "--- Second Connection (Resume TLS 1.3 Session) ---"
-# Use session file with ticket for resumption
-echo "Using session file with ticket for TLS 1.3 resumption..."
+# Second connection - resume TLS 1.3 session on second server using ticket from first server
+echo "--- Second Connection (Resume TLS 1.3 Session on ${TLS_HOST_2}:${TLS_PORT_2}) ---"
+echo "Using session ticket from ${TLS_HOST_1}:${TLS_PORT_1} to resume on ${TLS_HOST_2}:${TLS_PORT_2}..."
 # Keep connection open briefly to verify resumption
 (echo ""; sleep 1) | timeout 10 openssl s_client \
-    -connect "${TLS_HOST}:${TLS_PORT}" \
+    -connect "${TLS_HOST_2}:${TLS_PORT_2}" \
     -tls1_3 \
     $CLIENT_OPTS \
     -sess_in "$SESSION_FILE" \
@@ -244,8 +259,8 @@ EARLY_DATA=$(grep -aiE "Early data" /tmp/tls_second.log 2>/dev/null | grep -vi "
 TLS13_RESUMPTION=$(grep -aiE "TLSv1\.3.*Reused|PSK.*accepted|Resumption.*PSK" /tmp/tls_second.log 2>/dev/null || true)
 
 echo "--- Verification ---"
-echo "First connection:  TLS $TLS_VERSION${TLS_CIPHER:+ ($TLS_CIPHER)}"
-echo "Second connection: TLS $TLS_VERSION_2${TLS_CIPHER_2:+ ($TLS_CIPHER_2)}"
+echo "First connection (${TLS_HOST_1}:${TLS_PORT_1}):  TLS $TLS_VERSION${TLS_CIPHER:+ ($TLS_CIPHER)}"
+echo "Second connection (${TLS_HOST_2}:${TLS_PORT_2}): TLS $TLS_VERSION_2${TLS_CIPHER_2:+ ($TLS_CIPHER_2)}"
 if [ "$TLS_VERSION" != "$TLS_VERSION_2" ] && [ "$TLS_VERSION_2" != "unknown" ]; then
     echo -e "${RED}Warning: TLS version mismatch between connections${NC}"
 fi
@@ -304,18 +319,20 @@ if grep -aqi "Resumption PSK:" /tmp/tls_second.log 2>/dev/null; then
 fi
 
 if [ "$TICKET_USED" = "false" ]; then
-    echo -e "${RED}ERROR: TLS 1.3 session ticket was not received from server${NC}"
+    echo -e "${RED}ERROR: TLS 1.3 session ticket was not accepted by second server${NC}"
     echo ""
-    echo "For TLS 1.3, the server must send a NewSessionTicket message after the handshake."
-    echo "Session resumption did not occur, which indicates no usable ticket was received."
+    echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was not accepted by ${TLS_HOST_2}:${TLS_PORT_2}."
+    echo "This indicates the servers may not share the same ticket seed/key."
     echo ""
     echo "Possible reasons:"
-    echo "  1. Server is not configured to send session tickets"
-    echo "  2. Server has session tickets disabled"
-    echo "  3. Server configuration issue with TLS 1.3 session resumption"
+    echo "  1. Servers do not share the same ticket seed/key"
+    echo "  2. Second server is not configured to accept session tickets"
+    echo "  3. Second server has session tickets disabled"
+    echo "  4. Server configuration issue with TLS 1.3 session resumption"
     echo ""
     echo "Debug information:"
-    echo "  TLS version: $TLS_VERSION"
+    echo "  First server: ${TLS_HOST_1}:${TLS_PORT_1} - TLS version: $TLS_VERSION"
+    echo "  Second server: ${TLS_HOST_2}:${TLS_PORT_2} - TLS version: $TLS_VERSION_2"
     echo "  Session resumption detected: No"
     echo ""
     echo "First connection log (TLS negotiation):"
@@ -330,7 +347,8 @@ if [ "$TICKET_USED" = "false" ]; then
     rm -f "$SESSION_FILE" /tmp/tls_first.log /tmp/tls_second.log
     exit 1
 else
-    echo "✓ TLS 1.3 session ticket was received and used successfully"
+    echo "✓ TLS 1.3 session ticket from ${TLS_HOST_1}:${TLS_PORT_1} was accepted by ${TLS_HOST_2}:${TLS_PORT_2}"
+    echo "  This confirms the servers share the same ticket seed/key for stateless resumption."
 fi
 echo ""
 
@@ -373,12 +391,20 @@ fi
 echo ""
 if [ "$RESUMPTION_SUCCESS" = "true" ]; then
     echo -e "${GREEN}=========================================="
-    echo -e "✓ TLS 1.3 Session Resumption: SUCCESS"
+    echo -e "✓ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
     echo -e "==========================================${NC}"
+    echo ""
+    echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was successfully"
+    echo "used to resume a session on ${TLS_HOST_2}:${TLS_PORT_2}."
+    echo "This confirms stateless ticket sharing is working correctly."
     exit 0
 else
     echo -e "${RED}=========================================="
-    echo -e "✗ TLS 1.3 Session Resumption: FAILED"
+    echo -e "✗ TLS 1.3 Cross-Server Session Resumption: FAILED"
     echo -e "==========================================${NC}"
+    echo ""
+    echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was not accepted"
+    echo "by ${TLS_HOST_2}:${TLS_PORT_2}. The servers may not share"
+    echo "the same ticket seed/key."
     exit 1
 fi
