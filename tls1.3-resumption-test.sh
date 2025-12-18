@@ -115,7 +115,7 @@ fi
 if ! echo "$TLS_VERSION" | grep -qE "TLSv1\.3|1\.3"; then
     echo -e "${RED}ERROR: TLS 1.3 was not negotiated${NC}"
     echo ""
-    
+
     # Provide specific error message based on what we detected
     if [ -n "$PROTOCOL_ERROR" ] || [ -n "$SSL_ERROR" ]; then
         echo "The server rejected the TLS 1.3 handshake attempt."
@@ -146,7 +146,7 @@ if ! echo "$TLS_VERSION" | grep -qE "TLSv1\.3|1\.3"; then
         echo "Could not determine negotiated TLS version."
         echo ""
     fi
-    
+
     echo "This script requires TLS 1.3. The server may only support older TLS versions."
     echo ""
     echo "Possible reasons:"
