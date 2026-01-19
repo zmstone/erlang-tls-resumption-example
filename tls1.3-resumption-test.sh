@@ -16,9 +16,62 @@
 
 set -euo pipefail
 
-# Parse host:port arguments
-# First endpoint (to get ticket from)
-TLS_HOST_PORT_1="${1:-localhost:8883}"
+# Parse command-line arguments
+SEND_EARLY_DATA=true
+TLS_HOST_PORT_1=""
+TLS_HOST_PORT_2=""
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-early-data|--disable-early-data)
+            SEND_EARLY_DATA=false
+            shift
+            ;;
+        --early-data|--enable-early-data)
+            SEND_EARLY_DATA=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS] [FIRST_HOST:PORT] [SECOND_HOST:PORT]"
+            echo ""
+            echo "Options:"
+            echo "  --no-early-data, --disable-early-data  Do not send early data (0-RTT) in second connection"
+            echo "  --early-data, --enable-early-data      Send early data (0-RTT) in second connection (default)"
+            echo "  --help, -h                             Show this help message"
+            echo ""
+            echo "Arguments:"
+            echo "  FIRST_HOST:PORT   First server endpoint to get session ticket from (default: localhost:8883)"
+            echo "  SECOND_HOST:PORT  Second server endpoint to use ticket on (default: same as first)"
+            echo ""
+            echo "Examples:"
+            echo "  $0 localhost:9999"
+            echo "  $0 --no-early-data localhost:9999"
+            echo "  $0 --early-data localhost:9999 localhost:9999"
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+        *)
+            if [ -z "$TLS_HOST_PORT_1" ]; then
+                TLS_HOST_PORT_1="$1"
+            elif [ -z "$TLS_HOST_PORT_2" ]; then
+                TLS_HOST_PORT_2="$1"
+            else
+                echo "Too many arguments" >&2
+                echo "Use --help for usage information" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Set defaults if not provided
+TLS_HOST_PORT_1="${TLS_HOST_PORT_1:-localhost:8883}"
 if [[ "$TLS_HOST_PORT_1" == *:* ]]; then
     TLS_HOST_1="${TLS_HOST_PORT_1%%:*}"
     TLS_PORT_1="${TLS_HOST_PORT_1##*:}"
@@ -28,7 +81,7 @@ else
 fi
 
 # Second endpoint (to use ticket on) - defaults to first endpoint if not provided
-TLS_HOST_PORT_2="${2:-$TLS_HOST_PORT_1}"
+TLS_HOST_PORT_2="${TLS_HOST_PORT_2:-$TLS_HOST_PORT_1}"
 if [[ "$TLS_HOST_PORT_2" == *:* ]]; then
     TLS_HOST_2="${TLS_HOST_PORT_2%%:*}"
     TLS_PORT_2="${TLS_HOST_PORT_2##*:}"
@@ -203,7 +256,7 @@ if ! echo "$TLS_VERSION" | grep -qE "TLSv1\.3|1\.3"; then
     echo "Full connection log (last 15 lines):"
     strings /tmp/tls_first.log 2>/dev/null | tail -15
     echo ""
-    rm -f "$SESSION_FILE" /tmp/tls_first.log /tmp/tls_second.log
+    rm -f "$SESSION_FILE" /tmp/tls_first.log
     exit 1
 fi
 
@@ -239,7 +292,7 @@ if [ "$SESSION_FILE_SIZE" = "0" ]; then
     echo "First connection log (TLS negotiation):"
     strings /tmp/tls_first.log 2>/dev/null | grep -a "New, TLSv" | head -3
     echo ""
-    rm -f "$SESSION_FILE" /tmp/tls_first.log /tmp/tls_second.log
+    rm -f "$SESSION_FILE" /tmp/tls_first.log
     exit 1
 else
     echo "  Session file contains ticket data ($SESSION_FILE_SIZE bytes)"
@@ -252,11 +305,24 @@ sleep 1
 # Use the same client ID for the second connection (to verify session resumption)
 EARLY_DATA_FILE=$(mktemp)
 echo -n "ping-${CLIENT_ID}" > "$EARLY_DATA_FILE"
+# Verify file was created and get absolute path
+if [ ! -f "$EARLY_DATA_FILE" ]; then
+    echo -e "${RED}ERROR: Failed to create early data file${NC}" >&2
+    exit 1
+fi
+# Get absolute path to ensure it's accessible in subshells
+EARLY_DATA_FILE=$(readlink -f "$EARLY_DATA_FILE" 2>/dev/null || realpath "$EARLY_DATA_FILE" 2>/dev/null || echo "$EARLY_DATA_FILE")
 
 # Second connection - resume TLS 1.3 session on second server using ticket from first server
 echo "--- Second Connection (Resume TLS 1.3 Session on ${TLS_HOST_2}:${TLS_PORT_2}) ---"
 echo "Using session ticket from ${TLS_HOST_1}:${TLS_PORT_1} to resume on ${TLS_HOST_2}:${TLS_PORT_2}..."
-echo "Sending ping-${CLIENT_ID} as early data (0-RTT)..."
+
+# Determine early data behavior based on flag
+if [ "$SEND_EARLY_DATA" = "true" ]; then
+    echo "Sending ping-${CLIENT_ID} as early data (0-RTT)..."
+else
+    echo "Early data disabled - will send ping after handshake completes..."
+fi
 # Send early data (ping message) during handshake, then wait to receive pong response
 # We need to keep the connection open and read the response
 # Use a background process to read pong while openssl sends early data
@@ -278,14 +344,45 @@ EARLY_DATA_ACCEPTED=false
         # Keep stdin open by sending a newline (but openssl might close anyway)
         # Actually, just keep the process alive
         sleep 3
+    ) | (
+        if [ "$SEND_EARLY_DATA" = "true" ]; then
+            timeout 10 openssl s_client \
+                -connect "${TLS_HOST_2}:${TLS_PORT_2}" \
+                -tls1_3 \
+                $CLIENT_OPTS \
+                -sess_in "$SESSION_FILE" \
+                -early_data "$EARLY_DATA_FILE" \
+                -msg \
+                -debug \
+                2>&1
+        else
+            timeout 10 openssl s_client \
+                -connect "${TLS_HOST_2}:${TLS_PORT_2}" \
+                -tls1_3 \
+                $CLIENT_OPTS \
+                -sess_in "$SESSION_FILE" \
+                -msg \
+                -debug \
+                2>&1
+        fi
+    )
+) > /tmp/tls_second.log 2>&1 || true
+
+# If early data is disabled, send ping message after handshake completes
+if [ "$SEND_EARLY_DATA" = "false" ]; then
+    (
+        sleep 1
+        echo -n "ping-${CLIENT_ID}"
+        sleep 2
     ) | timeout 10 openssl s_client \
         -connect "${TLS_HOST_2}:${TLS_PORT_2}" \
         -tls1_3 \
         $CLIENT_OPTS \
         -sess_in "$SESSION_FILE" \
-        -early_data "$EARLY_DATA_FILE" \
-        2>&1
-) > /tmp/tls_second.log 2>&1 || true
+        -msg \
+        -debug \
+        2>&1 >> /tmp/tls_second.log || true
+fi
 
 # Also capture raw output for debugging
 cp /tmp/tls_second.log /tmp/tls_second_raw.log 2>/dev/null || true
@@ -308,34 +405,113 @@ if strings /tmp/tls_second.log 2>/dev/null | grep -aqi "pong" || \
     PONG_RECEIVED=true
 fi
 
+# Check if ServerHello contains early_data extension by parsing OpenSSL's message output
+# OpenSSL -msg shows hex dumps of TLS messages
+EARLY_DATA_EXTENSION_IN_SERVERHELLO=false
+if [ "$SEND_EARLY_DATA" = "true" ]; then
+    echo "--- Checking for early_data extension in ServerHello ---"
+else
+    echo "--- Checking for early_data extension in ServerHello (early data not sent) ---"
+fi
+
+# Extract ServerHello message from OpenSSL output
+# OpenSSL -msg outputs messages in format: ">>> TLS 1.3 Handshake [length=XXXX], ServerHello"
+SERVERHELLO_START=$(grep -an ">>> TLS 1.3 Handshake.*ServerHello\|ServerHello, Length" /tmp/tls_second.log 2>/dev/null | head -1 | cut -d: -f1 || echo "")
+
+if [ -n "$SERVERHELLO_START" ]; then
+    # Extract the ServerHello section (next 50-100 lines should contain the hex dump)
+    SERVERHELLO_SECTION=$(sed -n "${SERVERHELLO_START},$((SERVERHELLO_START + 100))p" /tmp/tls_second.log 2>/dev/null | \
+                          grep -aA 80 "^>>>\|^<<<" | head -80 || \
+                          sed -n "${SERVERHELLO_START},$((SERVERHELLO_START + 100))p" /tmp/tls_second.log 2>/dev/null)
+
+    # Save ServerHello section to a file for inspection
+    echo "$SERVERHELLO_SECTION" > /tmp/serverhello_dump.txt 2>/dev/null || true
+
+    if [ -n "$SERVERHELLO_SECTION" ]; then
+        echo "  Found ServerHello message, parsing extensions..."
+        echo "  (Full ServerHello dump saved to /tmp/serverhello_dump.txt)"
+
+        # early_data extension type is 0x002a (42 decimal, TLS extension type)
+        # Look for this in the hex dump - it appears as "002a" or "00 2a"
+        if echo "$SERVERHELLO_SECTION" | grep -aqiE "002a|00 2a|0x002a"; then
+            EARLY_DATA_EXTENSION_IN_SERVERHELLO=true
+            echo "  ✓ ServerHello contains early_data extension (found extension type 0x002a)"
+
+            # Try to extract the Max Early Data value from the extension
+            # Extension format: extension_type (2 bytes: 00 2a) + extension_length (2 bytes) + max_early_data_size (4 bytes, big-endian)
+            # Look for pattern: 00 2a followed by length and value
+            EXTENSION_LINE=$(echo "$SERVERHELLO_SECTION" | grep -aiE "002a|00 2a" | head -1)
+            if [ -n "$EXTENSION_LINE" ]; then
+                echo "    Extension found in hex dump:"
+                echo "$EXTENSION_LINE" | sed 's/^/      /'
+            fi
+        else
+            echo "  ✗ ServerHello does NOT contain early_data extension (extension type 0x002a not found)"
+            echo "    Showing ServerHello hex dump for inspection:"
+            echo "$SERVERHELLO_SECTION" | head -30 | sed 's/^/    /'
+            echo "    (Full dump in /tmp/serverhello_dump.txt)"
+        fi
+    fi
+else
+    # Fallback: check for "Max Early Data:" in OpenSSL's parsed output
+    # This is derived from parsing the ServerHello, so it's a reliable indicator
+    if grep -aqi "Max Early Data:" /tmp/tls_second.log 2>/dev/null; then
+        MAX_EARLY_DATA_VALUE=$(grep -ai "Max Early Data:" /tmp/tls_second.log 2>/dev/null | head -1 | sed 's/.*Max Early Data: *//' | tr -d ' ' || echo "")
+        if [ -n "$MAX_EARLY_DATA_VALUE" ] && [ "$MAX_EARLY_DATA_VALUE" != "0" ]; then
+            EARLY_DATA_EXTENSION_IN_SERVERHELLO=true
+            echo "  ✓ ServerHello contains early_data extension (Max Early Data: $MAX_EARLY_DATA_VALUE)"
+            echo "    (Parsed from ServerHello by OpenSSL)"
+        else
+            echo "  ✗ ServerHello does NOT contain early_data extension (Max Early Data: 0)"
+        fi
+    else
+        echo "  ⚠ Could not find ServerHello message in OpenSSL output"
+        echo "    The -msg flag should show TLS messages. Check /tmp/tls_second.log for details"
+        echo "    Looking for patterns: 'ServerHello' or '>>> TLS 1.3 Handshake'"
+    fi
+fi
+echo ""
+
 # Check OpenSSL output for early data status
 EARLY_DATA_REJECTED=$(grep -ai "Early data was rejected" /tmp/tls_second.log /tmp/tls_second_raw.log 2>/dev/null || echo "")
 EARLY_DATA_ACCEPTED_MSG=$(grep -ai "Early data was accepted\|Early data was sent" /tmp/tls_second.log /tmp/tls_second_raw.log 2>/dev/null || echo "")
 
-# Assert that pong was received (this confirms early data was accepted and processed)
-if [ "$PONG_RECEIVED" = "true" ]; then
-    echo "  ✓ Received pong response - early data was accepted and processed by server"
-    EARLY_DATA_ACCEPTED=true
-elif [ -n "$EARLY_DATA_REJECTED" ]; then
-    echo -e "  ${RED}✗ ERROR: Early data was REJECTED by server${NC}"
-    echo "  OpenSSL reports: Early data was rejected"
-    echo "  This confirms the server has early_data disabled"
-    echo "  No pong response received (early data was not processed)"
-    EARLY_DATA_ACCEPTED=false
-elif [ -n "$EARLY_DATA_ACCEPTED_MSG" ]; then
-    echo "  ? Early data was sent, but pong not received"
-    echo "  This may indicate a communication issue"
-    EARLY_DATA_ACCEPTED=false
+# Assert that pong was received
+if [ "$SEND_EARLY_DATA" = "true" ]; then
+    # Check if pong was received (this confirms early data was accepted and processed)
+    if [ "$PONG_RECEIVED" = "true" ]; then
+        echo "  ✓ Received pong response - early data was accepted and processed by server"
+        EARLY_DATA_ACCEPTED=true
+    elif [ -n "$EARLY_DATA_REJECTED" ]; then
+        echo -e "  ${RED}✗ ERROR: Early data was REJECTED by server${NC}"
+        echo "  OpenSSL reports: Early data was rejected"
+        echo "  This confirms the server has early_data disabled"
+        echo "  No pong response received (early data was not processed)"
+        EARLY_DATA_ACCEPTED=false
+    elif [ -n "$EARLY_DATA_ACCEPTED_MSG" ]; then
+        echo "  ? Early data was sent, but pong not received"
+        echo "  This may indicate a communication issue"
+        EARLY_DATA_ACCEPTED=false
+    else
+        echo -e "  ${RED}✗ ERROR: Did not receive pong response${NC}"
+        echo "  This indicates early data was NOT accepted/processed by the server"
+        echo "  (Server may have early_data disabled)"
+        EARLY_DATA_ACCEPTED=false
+        # Show what we did receive for debugging
+        echo "  Checking connection output..."
+        if [ -f /tmp/tls_second_raw.log ]; then
+            echo "  Relevant lines from connection output:"
+            grep -i "early\|pong\|reused" /tmp/tls_second_raw.log 2>/dev/null | head -5 | sed 's/^/    /' || true
+        fi
+    fi
 else
-    echo -e "  ${RED}✗ ERROR: Did not receive pong response${NC}"
-    echo "  This indicates early data was NOT accepted/processed by the server"
-    echo "  (Server may have early_data disabled)"
-    EARLY_DATA_ACCEPTED=false
-    # Show what we did receive for debugging
-    echo "  Checking connection output..."
-    if [ -f /tmp/tls_second_raw.log ]; then
-        echo "  Relevant lines from connection output:"
-        grep -i "early\|pong\|reused" /tmp/tls_second_raw.log 2>/dev/null | head -5 | sed 's/^/    /' || true
+    # Early data was not sent, just check for pong response
+    if [ "$PONG_RECEIVED" = "true" ]; then
+        echo "  ✓ Received pong response (ping sent after handshake)"
+        EARLY_DATA_ACCEPTED=false  # Not early data, so mark as false
+    else
+        echo -e "  ${RED}✗ ERROR: Did not receive pong response${NC}"
+        EARLY_DATA_ACCEPTED=false
     fi
 fi
 
@@ -456,7 +632,8 @@ if [ "$TICKET_USED" = "false" ]; then
     echo "Resumption indicators searched for: Reused, Resumed, PSK, Early data"
     strings /tmp/tls_second.log 2>/dev/null | grep -iE "reused|resumed|psk|early" | head -5 || echo "  None found"
     echo ""
-    rm -f "$SESSION_FILE" /tmp/tls_first.log /tmp/tls_second.log
+    rm -f "$SESSION_FILE" /tmp/tls_first.log
+    echo "  (Logs preserved: /tmp/tls_first.log, /tmp/tls_second.log)"
     exit 1
 else
     echo "✓ TLS 1.3 session ticket from ${TLS_HOST_1}:${TLS_PORT_1} was accepted by ${TLS_HOST_2}:${TLS_PORT_2}"
@@ -494,17 +671,23 @@ if [ "$RESUMPTION_SUCCESS" = "false" ]; then
     tail -30 /tmp/tls_second.log 2>/dev/null || echo "Log file not found or empty"
 fi
 
-# Cleanup (only if successful, keep logs on failure for debugging)
+# Cleanup (keep logs for inspection)
+# Note: /tmp/tls_second.log is preserved for inspection
 if [ "$RESUMPTION_SUCCESS" = "true" ]; then
-    rm -f "$SESSION_FILE" /tmp/tls_first.log /tmp/tls_second.log
+    rm -f "$SESSION_FILE" /tmp/tls_first.log
+    echo ""
+    echo "Logs preserved for inspection:"
+    echo "  - /tmp/tls_second.log (second connection with early data)"
+    echo "  - /tmp/serverhello_dump.txt (ServerHello message dump)"
 fi
 
 # Print result
 echo ""
 if [ "$RESUMPTION_SUCCESS" = "true" ]; then
-    # Check if early data was also accepted (if we tested it)
-    if [ -n "${EARLY_DATA_ACCEPTED:-}" ]; then
-        if [ "$EARLY_DATA_ACCEPTED" = "true" ]; then
+    # Check if early data was tested and its status
+    if [ "$SEND_EARLY_DATA" = "true" ]; then
+        # Early data was sent - report acceptance/rejection
+        if [ "${EARLY_DATA_ACCEPTED:-false}" = "true" ]; then
             echo -e "${GREEN}=========================================="
             echo -e "✓ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
             echo -e "✓ Early Data (0-RTT): ACCEPTED"
@@ -529,13 +712,17 @@ if [ "$RESUMPTION_SUCCESS" = "true" ]; then
             exit 0
         fi
     else
+        # Early data was not sent - don't report it as rejected
         echo -e "${GREEN}=========================================="
         echo -e "✓ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
+        echo -e "  Early Data (0-RTT): NOT TESTED (disabled)"
         echo -e "==========================================${NC}"
         echo ""
         echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was successfully"
         echo "used to resume a session on ${TLS_HOST_2}:${TLS_PORT_2}."
         echo "This confirms stateless ticket sharing is working correctly."
+        echo ""
+        echo "Note: Early data was not tested (--no-early-data flag was used)."
         exit 0
     fi
 else
