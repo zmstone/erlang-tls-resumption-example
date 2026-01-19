@@ -10,6 +10,7 @@
     which_side/0,
     files/0,
     log_level/0,
+    early_data/0,
     start/0,
     client_no_host_check/0,
     log/2,
@@ -104,6 +105,30 @@ log_level() ->
             notice;
         "debug" ->
             debug
+    end.
+
+early_data() ->
+    case os:getenv("TLSER_EARLY_DATA") of
+        false ->
+            disabled;
+        "enabled" ->
+            enabled;
+        "1" ->
+            enabled;
+        "true" ->
+            enabled;
+        "yes" ->
+            enabled;
+        "disabled" ->
+            disabled;
+        "0" ->
+            disabled;
+        "false" ->
+            disabled;
+        "no" ->
+            disabled;
+        _ ->
+            disabled
     end.
 
 tls_version() ->

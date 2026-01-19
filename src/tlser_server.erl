@@ -54,8 +54,7 @@ init([]) ->
                     {reuse_sessions, true},
                     % Enable stateless session tickets with certificate info for TLS 1.3
                     {session_tickets, stateless_with_cert},
-                    % TLS 1.2 session resumption uses external storage configured via application env (session_cb)
-                    {early_data, enabled}
+                    {early_data, tlser:early_data()}
                 ]
         ),
     tlser:log(info, "server> listening on port ~p~n", [tlser:server_port()]),
