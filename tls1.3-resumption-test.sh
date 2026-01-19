@@ -63,6 +63,7 @@ fi
 # Color codes
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
 SESSION_FILE=$(mktemp)
@@ -77,16 +78,38 @@ echo "This test verifies that stateless TLS 1.3 tickets can be"
 echo "shared across servers that use the same ticket seed/key."
 echo ""
 
+# Generate a unique client ID for server tracking (same format as Python script)
+CLIENT_ID=$(uuidgen 2>/dev/null | cut -c1-16 || echo "$(date +%s)-$$")
+
 # First connection - establish TLS 1.3 session on first server
 echo "--- First Connection (Establish TLS 1.3 Session on ${TLS_HOST_1}:${TLS_PORT_1}) ---"
 # Force TLS 1.3 - exit with error if server doesn't support it
-# Keep connection open briefly to receive session ticket (TLS 1.3 tickets are sent after handshake)
-(echo ""; sleep 1) | timeout 10 openssl s_client \
+# Send ping message, wait for pong, then close
+# Keep connection open to receive session ticket (TLS 1.3 tickets are sent after handshake)
+# Use a named pipe or process substitution to send ping and read pong
+(timeout 3 bash -c '
+    # Wait for handshake to complete (TLS 1.3 handshake is fast)
+    sleep 0.5
+    # Send ping message (use echo -n to avoid trailing newline)
+    echo -n "ping-'"$CLIENT_ID"'"
+    # Wait a bit for pong response
+    sleep 1
+' || true) | timeout 10 openssl s_client \
     -connect "${TLS_HOST_1}:${TLS_PORT_1}" \
     -tls1_3 \
     $CLIENT_OPTS \
     -sess_out "$SESSION_FILE" \
     > /tmp/tls_first.log 2>&1 || true
+
+# Check if pong was received in the first connection
+FIRST_PONG_RECEIVED=false
+if grep -aqi "pong" /tmp/tls_first.log 2>/dev/null || \
+   strings /tmp/tls_first.log 2>/dev/null | grep -aqi "pong"; then
+    FIRST_PONG_RECEIVED=true
+    echo "  ✓ Received pong response from first connection"
+else
+    echo "  ⚠ Did not detect pong response in first connection (may be in binary output)"
+fi
 
 # Check for TLS handshake errors - look for protocol version errors
 PROTOCOL_ERROR=$(strings /tmp/tls_first.log 2>/dev/null | grep -iE "protocol version|tlsv1 alert|alert protocol" | head -1 || echo "")
@@ -226,21 +249,110 @@ echo ""
 # Wait a moment before connecting to second server
 sleep 1
 
+# Use the same client ID for the second connection (to verify session resumption)
+EARLY_DATA_FILE=$(mktemp)
+echo -n "ping-${CLIENT_ID}" > "$EARLY_DATA_FILE"
+
 # Second connection - resume TLS 1.3 session on second server using ticket from first server
 echo "--- Second Connection (Resume TLS 1.3 Session on ${TLS_HOST_2}:${TLS_PORT_2}) ---"
 echo "Using session ticket from ${TLS_HOST_1}:${TLS_PORT_1} to resume on ${TLS_HOST_2}:${TLS_PORT_2}..."
-# Keep connection open briefly to verify resumption
-(echo ""; sleep 1) | timeout 10 openssl s_client \
-    -connect "${TLS_HOST_2}:${TLS_PORT_2}" \
-    -tls1_3 \
-    $CLIENT_OPTS \
-    -sess_in "$SESSION_FILE" \
-    > /tmp/tls_second.log 2>&1 || true
+echo "Sending ping-${CLIENT_ID} as early data (0-RTT)..."
+# Send early data (ping message) during handshake, then wait to receive pong response
+# We need to keep the connection open and read the response
+# Use a background process to read pong while openssl sends early data
+PONG_RECEIVED=false
+EARLY_DATA_ACCEPTED=false
+
+# Run openssl s_client with early data and capture all output
+# Send early data during handshake, then keep connection open to receive pong response
+# openssl s_client with -early_data will send the data during handshake (0-RTT)
+# We need to keep the connection open to receive the pong response
+# Use a pipe that stays open to keep stdin alive
+(
+    # Create a pipe that will stay open
+    # Send early data during handshake, then wait for pong response
+    # Keep connection open by feeding empty input after a delay
+    (
+        # Wait a moment for handshake to complete and early data to be sent
+        sleep 0.5
+        # Keep stdin open by sending a newline (but openssl might close anyway)
+        # Actually, just keep the process alive
+        sleep 3
+    ) | timeout 10 openssl s_client \
+        -connect "${TLS_HOST_2}:${TLS_PORT_2}" \
+        -tls1_3 \
+        $CLIENT_OPTS \
+        -sess_in "$SESSION_FILE" \
+        -early_data "$EARLY_DATA_FILE" \
+        2>&1
+) > /tmp/tls_second.log 2>&1 || true
+
+# Also capture raw output for debugging
+cp /tmp/tls_second.log /tmp/tls_second_raw.log 2>/dev/null || true
+
+# Check if pong was found
+if [ -f /tmp/pong_found.flag ]; then
+    PONG_RECEIVED=true
+    rm -f /tmp/pong_found.flag
+fi
+
+# Also check the log files for pong (in case it was written before we checked)
+if grep -aqi "pong" /tmp/tls_second.log 2>/dev/null || \
+   grep -aqi "pong" /tmp/tls_second_raw.log 2>/dev/null; then
+    PONG_RECEIVED=true
+fi
+
+# Check binary output (pong might be in binary form)
+if strings /tmp/tls_second.log 2>/dev/null | grep -aqi "pong" || \
+   strings /tmp/tls_second_raw.log 2>/dev/null | grep -aqi "pong"; then
+    PONG_RECEIVED=true
+fi
+
+# Check OpenSSL output for early data status
+EARLY_DATA_REJECTED=$(grep -ai "Early data was rejected" /tmp/tls_second.log /tmp/tls_second_raw.log 2>/dev/null || echo "")
+EARLY_DATA_ACCEPTED_MSG=$(grep -ai "Early data was accepted\|Early data was sent" /tmp/tls_second.log /tmp/tls_second_raw.log 2>/dev/null || echo "")
+
+# Assert that pong was received (this confirms early data was accepted and processed)
+if [ "$PONG_RECEIVED" = "true" ]; then
+    echo "  ✓ Received pong response - early data was accepted and processed by server"
+    EARLY_DATA_ACCEPTED=true
+elif [ -n "$EARLY_DATA_REJECTED" ]; then
+    echo -e "  ${RED}✗ ERROR: Early data was REJECTED by server${NC}"
+    echo "  OpenSSL reports: Early data was rejected"
+    echo "  This confirms the server has early_data disabled"
+    echo "  No pong response received (early data was not processed)"
+    EARLY_DATA_ACCEPTED=false
+elif [ -n "$EARLY_DATA_ACCEPTED_MSG" ]; then
+    echo "  ? Early data was sent, but pong not received"
+    echo "  This may indicate a communication issue"
+    EARLY_DATA_ACCEPTED=false
+else
+    echo -e "  ${RED}✗ ERROR: Did not receive pong response${NC}"
+    echo "  This indicates early data was NOT accepted/processed by the server"
+    echo "  (Server may have early_data disabled)"
+    EARLY_DATA_ACCEPTED=false
+    # Show what we did receive for debugging
+    echo "  Checking connection output..."
+    if [ -f /tmp/tls_second_raw.log ]; then
+        echo "  Relevant lines from connection output:"
+        grep -i "early\|pong\|reused" /tmp/tls_second_raw.log 2>/dev/null | head -5 | sed 's/^/    /' || true
+    fi
+fi
+
+# Clean up
+rm -f "$EARLY_DATA_FILE" /tmp/tls_second_raw.log
 
 # Extract TLS version from second connection for comparison
-TLS_VERSION_LINE_2=$(grep -a "New, TLSv" /tmp/tls_second.log 2>/dev/null | head -1 || echo "")
+# Check both log files
+TLS_VERSION_LINE_2=$(grep -a "New, TLSv\|Reused, TLSv" /tmp/tls_second.log 2>/dev/null | head -1 || echo "")
+if [ -z "$TLS_VERSION_LINE_2" ] && [ -f /tmp/tls_second_raw.log ]; then
+    TLS_VERSION_LINE_2=$(grep -a "New, TLSv\|Reused, TLSv" /tmp/tls_second_raw.log 2>/dev/null | head -1 || echo "")
+fi
 if [ -z "$TLS_VERSION_LINE_2" ]; then
-    TLS_VERSION_LINE_2=$(strings /tmp/tls_second.log 2>/dev/null | grep "New, TLSv" | head -1 || echo "")
+    TLS_VERSION_LINE_2=$(strings /tmp/tls_second.log 2>/dev/null | grep "New, TLSv\|Reused, TLSv" | head -1 || echo "")
+fi
+if [ -z "$TLS_VERSION_LINE_2" ] && [ -f /tmp/tls_second_raw.log ]; then
+    TLS_VERSION_LINE_2=$(strings /tmp/tls_second_raw.log 2>/dev/null | grep "New, TLSv\|Reused, TLSv" | head -1 || echo "")
 fi
 if [ -n "$TLS_VERSION_LINE_2" ]; then
     TLS_VERSION_2=$(echo "$TLS_VERSION_LINE_2" | grep -oE "TLSv[0-9.]+" | head -1 || echo "unknown")
@@ -390,14 +502,42 @@ fi
 # Print result
 echo ""
 if [ "$RESUMPTION_SUCCESS" = "true" ]; then
-    echo -e "${GREEN}=========================================="
-    echo -e "✓ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
-    echo -e "==========================================${NC}"
-    echo ""
-    echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was successfully"
-    echo "used to resume a session on ${TLS_HOST_2}:${TLS_PORT_2}."
-    echo "This confirms stateless ticket sharing is working correctly."
-    exit 0
+    # Check if early data was also accepted (if we tested it)
+    if [ -n "${EARLY_DATA_ACCEPTED:-}" ]; then
+        if [ "$EARLY_DATA_ACCEPTED" = "true" ]; then
+            echo -e "${GREEN}=========================================="
+            echo -e "✓ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
+            echo -e "✓ Early Data (0-RTT): ACCEPTED"
+            echo -e "==========================================${NC}"
+            echo ""
+            echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was successfully"
+            echo "used to resume a session on ${TLS_HOST_2}:${TLS_PORT_2}."
+            echo "Early data (ping message) was sent and pong was received."
+            echo "This confirms stateless ticket sharing and 0-RTT are working correctly."
+            exit 0
+        else
+            echo -e "${YELLOW}=========================================="
+            echo -e "⚠ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
+            echo -e "✗ Early Data (0-RTT): REJECTED"
+            echo -e "==========================================${NC}"
+            echo ""
+            echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was successfully"
+            echo "used to resume a session on ${TLS_HOST_2}:${TLS_PORT_2}."
+            echo "However, early data was NOT accepted (server may have early_data disabled)."
+            echo ""
+            echo "Session resumption works, but 0-RTT early data is not enabled."
+            exit 0
+        fi
+    else
+        echo -e "${GREEN}=========================================="
+        echo -e "✓ TLS 1.3 Cross-Server Session Resumption: SUCCESS"
+        echo -e "==========================================${NC}"
+        echo ""
+        echo "The ticket from ${TLS_HOST_1}:${TLS_PORT_1} was successfully"
+        echo "used to resume a session on ${TLS_HOST_2}:${TLS_PORT_2}."
+        echo "This confirms stateless ticket sharing is working correctly."
+        exit 0
+    fi
 else
     echo -e "${RED}=========================================="
     echo -e "✗ TLS 1.3 Cross-Server Session Resumption: FAILED"

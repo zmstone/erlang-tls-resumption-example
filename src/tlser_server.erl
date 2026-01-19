@@ -53,8 +53,9 @@ init([]) ->
                     % Enable TLS 1.2 session resumption (uses session_cb from config)
                     {reuse_sessions, true},
                     % Enable stateless session tickets with certificate info for TLS 1.3
-                    {session_tickets, stateless_with_cert}
+                    {session_tickets, stateless_with_cert},
                     % TLS 1.2 session resumption uses external storage configured via application env (session_cb)
+                    {early_data, enabled}
                 ]
         ),
     tlser:log(info, "server> listening on port ~p~n", [tlser:server_port()]),
@@ -74,6 +75,7 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
         {ok, Socket} ->
             % Handshake succeeded - get session information
             % Session resumption will be determined when we receive the ping message with client ID
+            % Check if socket is still alive before calling connection_information
             case ssl:connection_information(Socket, [protocol, session_id]) of
                 {ok, ConnInfo} ->
                     Protocol = proplists:get_value(protocol, ConnInfo),
@@ -83,6 +85,7 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
                     tlser:log(info, "server> Session ID: ~P~n", [SessionId, 10]),
                     % Schedule accepting another connection to handle concurrent connections
                     ClientSessions = maps:get(client_sessions, D, #{}),
+                    tlser:log(info, "server> DEBUG: client_sessions map size: ~p~n", [map_size(ClientSessions)]),
                     {next_state, accepted,
                         D#{
                             accepted => Socket,
@@ -92,9 +95,14 @@ handle_event(state_timeout, accept_connection, listening, #{listening := ListenS
                         [
                             {state_timeout, 0, accept_connection}
                         ]};
+                {error, closed} ->
+                    % Client closed connection immediately after handshake (common with early data)
+                    tlser:log(info, "server> Client closed connection immediately after handshake (may have sent early data)~n", []),
+                    ssl:close(Socket),
+                    {next_state, listening, D, [{state_timeout, 0, accept_connection}]};
                 {error, Reason} ->
                     tlser:log(error, "server> Socket error right after handshake: ~0p~n", [Reason]),
-                    ssl:close(Socket0),
+                    ssl:close(Socket),
                     {next_state, listening, D, [{state_timeout, 0, accept_connection}]}
             end;
         {error, Reason} ->
@@ -115,10 +123,12 @@ handle_event(enter, _OldState, accepted, #{listening := _ListenSock} = D) ->
     {keep_state, D, [{state_timeout, 0, accept_connection}]};
 handle_event(enter, _OldState, accepted, _Data) ->
     keep_state_and_data;
-handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening := ListenSock} = D) ->
+handle_event(info, {ssl_closed, Sock}, accepted, #{accepted := Sock, listening := ListenSock, client_sessions := ClientSessions} = D) ->
     tlser:log(info, "server> Connection closed~n", []),
+    tlser:log(info, "server> DEBUG: Preserving client_sessions map (size: ~p) when transitioning to listening~n", [map_size(ClientSessions)]),
     ssl:close(Sock),
     % Schedule accepting another connection
+    % Preserve client_sessions when transitioning back to listening
     {next_state, listening, D#{accepted => undefined, listening => ListenSock}, [
         {state_timeout, 0, accept_connection}
     ]};
@@ -133,12 +143,37 @@ handle_event(EventType, Event, accepted, _Data) ->
 
 % Extract client ID from ping- prefixed messages
 % Returns {ok, ClientId} if message starts with "ping-", {error, not_ping} otherwise
+% Strips trailing whitespace (newlines, spaces, etc.) from the client ID
 extract_client_id(Msg) ->
     case Msg of
-        <<"ping-", ClientId/binary>> ->
-            {ok, ClientId};
+        <<"ping-", ClientIdWithWhitespace/binary>> ->
+            % Strip trailing whitespace bytes (newlines, carriage returns, spaces, tabs)
+            % Find the last non-whitespace byte
+            TrimmedClientId = trim_trailing_whitespace(ClientIdWithWhitespace),
+            {ok, TrimmedClientId};
         _ ->
             {error, not_ping}
+    end.
+
+% Helper function to trim trailing whitespace from a binary
+trim_trailing_whitespace(Bin) ->
+    trim_trailing_whitespace(Bin, byte_size(Bin) - 1).
+
+trim_trailing_whitespace(_Bin, Pos) when Pos < 0 ->
+    <<>>;
+trim_trailing_whitespace(Bin, Pos) ->
+    case Bin of
+        <<Prefix:Pos/binary, Byte, _/binary>> ->
+            % Check if byte is whitespace (space, tab, newline, carriage return)
+            case Byte of
+                $\s -> trim_trailing_whitespace(Bin, Pos - 1);  % space
+                $\t -> trim_trailing_whitespace(Bin, Pos - 1);  % tab
+                $\n -> trim_trailing_whitespace(Bin, Pos - 1);  % newline
+                $\r -> trim_trailing_whitespace(Bin, Pos - 1);  % carriage return
+                _ -> <<Prefix/binary, Byte>>
+            end;
+        _ ->
+            Bin
     end.
 
 % Handle ping messages from clients
@@ -158,6 +193,9 @@ process_ping_message(Sock, ClientId, ClientSessions, Data) ->
     ClientInfo = maps:get(ClientId, ClientSessions, #{ping_count => 0, session_id => undefined}),
     PingCount = maps:get(ping_count, ClientInfo, 0),
     StoredSessionId = maps:get(session_id, ClientInfo, undefined),
+    tlser:log(info, "server> DEBUG: ClientId=~s, PingCount=~p, StoredSessionId=~n~P~n", [
+        ClientId, PingCount, StoredSessionId, 10
+    ]),
     NewPingCount = PingCount + 1,
     ExpectedResumption = NewPingCount > 1,
     % Check if session was resumed
